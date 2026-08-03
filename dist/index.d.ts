@@ -1,6 +1,7 @@
 import type { AgentResult, Provider, ProviderCapabilities, RunAgentOptions, RunRequest } from "./types";
 export * from "./errors";
 export * from "./types";
+export { probeExecutable, resolveOnWindows, runInvocation } from "./process";
 export { VERSION } from "./version";
 export { ClaudeAdapter, CodexAdapter, CursorAdapter, getAdapter } from "./adapters";
 export declare function runAgent(input: RunRequest, options?: RunAgentOptions): Promise<AgentResult>;

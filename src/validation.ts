@@ -28,7 +28,7 @@ export function normalizeRequest(request: RunRequest): RunRequest {
     access: request.access ?? (
       request.provider === "codex" && request.session?.mode === "resume"
         ? "inherit-session"
-        : "inspect"
+        : "answer-only"
     ),
     output: request.output ?? "events",
     session: request.session ?? (request.provider === "cursor" ? { mode: "persistent" } : { mode: "ephemeral" }),

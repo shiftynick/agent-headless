@@ -693,7 +693,7 @@ function normalizeRequest(request) {
   return {
     ...request,
     cwd: realpathSync(request.cwd),
-    access: request.access ?? (request.provider === "codex" && request.session?.mode === "resume" ? "inherit-session" : "inspect"),
+    access: request.access ?? (request.provider === "codex" && request.session?.mode === "resume" ? "inherit-session" : "answer-only"),
     output: request.output ?? "events",
     session: request.session ?? (request.provider === "cursor" ? { mode: "persistent" } : { mode: "ephemeral" }),
     timeoutMs: request.timeoutMs ?? 20 * 60000,
@@ -799,7 +799,10 @@ function assertSucceeded(result) {
 }
 export {
   unsupported,
+  runInvocation,
   runAgent,
+  resolveOnWindows,
+  probeExecutable,
   listModels,
   invalid,
   getCapabilities,

@@ -7,6 +7,7 @@ import { normalizeRequest } from "./validation";
 
 export * from "./errors";
 export * from "./types";
+export { probeExecutable, resolveOnWindows, runInvocation } from "./process";
 export { VERSION } from "./version";
 export { ClaudeAdapter, CodexAdapter, CursorAdapter, getAdapter } from "./adapters";
 

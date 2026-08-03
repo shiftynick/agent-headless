@@ -17,7 +17,7 @@ describe("ClaudeAdapter", () => {
   const adapter = new ClaudeAdapter();
 
   test("builds a safe ephemeral inspection stream", () => {
-    const invocation = adapter.build(request("claude", { model: "sonnet", effort: "high" }));
+    const invocation = adapter.build(request("claude", { model: "sonnet", effort: "high", access: "inspect" }));
     expect(invocation.args).toEqual([
       "-p", "--output-format", "stream-json", "--verbose",
       "--model", "sonnet", "--effort", "high",
@@ -131,7 +131,7 @@ describe("CursorAdapter", () => {
   const adapter = new CursorAdapter();
 
   test("defaults to a persistent, read-only plan session", () => {
-    const invocation = adapter.build(request("cursor", { model: "gpt-5.3-codex-low" }));
+    const invocation = adapter.build(request("cursor", { model: "gpt-5.3-codex-low", access: "inspect" }));
     for (const value of ["--print", "--model", "gpt-5.3-codex-low", "--output-format", "stream-json", "--mode", "plan"]) {
       expect(invocation.args).toContain(value);
     }

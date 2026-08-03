@@ -19,6 +19,8 @@
   Windows retains worktree isolation with an explicit host-write warning.
 - The CLI uses a Node shebang, exposes `--version`, and validates provider names
   for capability and model queries.
+- New sessions default to least-privilege `answer-only`; inspection and write
+  access are explicit.
 
 ## 0.1.0
 

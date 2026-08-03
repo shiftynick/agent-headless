@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { getCapabilities, runAgent } from "../src";
+import { runInvocation } from "../src/process";
 
 const fakeClaude = path.join(import.meta.dir, "fixtures", "fake-claude.cmd");
 
@@ -59,4 +60,27 @@ test("capability probing launches a Windows cmd shim and reports resolved availa
     if (previous === undefined) delete process.env.CLAUDE_BIN;
     else process.env.CLAUDE_BIN = previous;
   }
+});
+
+test("mid-run cancellation terminates a live provider process", async () => {
+  const controller = new AbortController();
+  const execution = runInvocation(
+    {
+      provider: "claude",
+      command: process.execPath,
+      args: ["-e", "process.stdout.write('started\\n'); setInterval(() => {}, 1000)"],
+      cwd: process.cwd(),
+      stdin: "",
+      structured: false,
+    },
+    {
+      timeoutMs: 10_000,
+      signal: controller.signal,
+      onStdoutLine: () => controller.abort(),
+    },
+  );
+  const result = await execution;
+  expect(result.cancelled).toBe(true);
+  expect(result.timedOut).toBe(false);
+  expect(result.durationMs).toBeLessThan(5_000);
 });

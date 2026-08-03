@@ -13,6 +13,12 @@ describe("normalizeRequest", () => {
     expect(normalizeRequest({ provider: "cursor", prompt: "x", cwd: process.cwd() }).session).toEqual({ mode: "persistent" });
   });
 
+  test("defaults every new session to least-privilege answer-only access", () => {
+    for (const provider of ["claude", "codex", "cursor"] as const) {
+      expect(normalizeRequest({ provider, prompt: "x", cwd: process.cwd() }).access).toBe("answer-only");
+    }
+  });
+
   test("rejects missing prompt and nonexistent cwd", () => {
     expect(() => normalizeRequest({ provider: "claude", prompt: "", cwd: process.cwd() })).toThrow();
     expect(() => normalizeRequest({ provider: "claude", prompt: "x", cwd: "Z:\\definitely-missing" })).toThrow();

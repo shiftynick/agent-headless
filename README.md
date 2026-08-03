@@ -88,7 +88,8 @@ session or schema output; Codex cannot change access or additional directories
 when resuming and has no `max` effort mapping.
 
 The library never enables provider flags that bypass approvals or sandboxes.
-Write access must be requested explicitly.
+New sessions default to `answer-only`; inspection and write access must be
+requested explicitly.
 
 Capability probing is runtime evidence, not a static promise. Each report says
 whether the configured executable is `available`, `missing`, or `unusable`, and

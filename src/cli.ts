@@ -18,8 +18,8 @@ Run options:
   --cwd <path>                    Working directory (default: current directory)
   --model <id>                    Provider model or alias (required for Cursor)
   --effort <level>                low, medium, high, xhigh, or max
-  --access <mode>                 answer-only, inspect, edit-workspace, edit-isolated
-  --session <mode>                ephemeral or persistent
+  --access <mode>                 answer-only (default), inspect, edit-workspace, edit-isolated, inherit-session
+  --session <mode>                ephemeral or persistent; use --resume for continuation
   --resume <id>                   Resume a provider session
   --output <mode>                 text or events (default: events)
   --schema <path>                 JSON Schema path (Claude or Codex)
