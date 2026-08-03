@@ -1,7 +1,7 @@
 import path from "node:path";
 import { unsupported } from "../errors";
 import { asRecord, numberValue, parseJsonLines } from "../jsonl";
-import { readVersion } from "../process";
+import { probeExecutable } from "../process";
 import type { AgentUsage, Invocation, ParsedOutput, ProviderAdapter, ProviderCapabilities, RunRequest } from "../types";
 import { assertAccess, assertSession, envExecutable, textOutput } from "./shared";
 
@@ -9,11 +9,13 @@ export class CodexAdapter implements ProviderAdapter {
   readonly provider = "codex" as const;
 
   async capabilities(executable = envExecutable(this.provider)): Promise<ProviderCapabilities> {
-    const version = await readVersion(this.provider, executable, process.cwd());
+    const probe = await probeExecutable(this.provider, executable, process.cwd());
     return {
       provider: this.provider,
-      executable,
-      ...(version ? { version } : {}),
+      executable: probe.executable,
+      availability: probe.availability,
+      ...(probe.version ? { version: probe.version } : {}),
+      ...(probe.reason ? { availabilityReason: probe.reason } : {}),
       access: ["answer-only", "inspect", "edit-workspace", "inherit-session"],
       sessions: ["ephemeral", "persistent", "resume"],
       supportsModel: true,

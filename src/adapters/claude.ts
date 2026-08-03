@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { unsupported } from "../errors";
 import { asRecord, numberValue, parseJsonLines } from "../jsonl";
-import { readVersion } from "../process";
+import { probeExecutable } from "../process";
 import type { AgentUsage, Invocation, ParsedOutput, ProviderAdapter, ProviderCapabilities, RunRequest } from "../types";
 import { assertAccess, assertSession, envExecutable, textOutput } from "./shared";
 
@@ -10,11 +10,13 @@ export class ClaudeAdapter implements ProviderAdapter {
 
   async capabilities(executable = envExecutable(this.provider)): Promise<ProviderCapabilities> {
     const cwd = process.cwd();
-    const version = await readVersion(this.provider, executable, cwd);
+    const probe = await probeExecutable(this.provider, executable, cwd);
     return {
       provider: this.provider,
-      executable,
-      ...(version ? { version } : {}),
+      executable: probe.executable,
+      availability: probe.availability,
+      ...(probe.version ? { version: probe.version } : {}),
+      ...(probe.reason ? { availabilityReason: probe.reason } : {}),
       access: ["answer-only", "inspect", "edit-workspace", "edit-isolated"],
       sessions: ["ephemeral", "persistent", "resume"],
       supportsModel: true,
@@ -82,7 +84,7 @@ export class ClaudeAdapter implements ProviderAdapter {
     if (!trimmed.includes("\n")) {
       try {
         const raw = JSON.parse(trimmed) as Record<string, unknown>;
-        return this.parseRecords([{ provider: this.provider, type: String(raw.type ?? "result"), raw }]);
+        return this.parseRecords([{ provider: this.provider, type: String(raw.type ?? "result"), kind: raw.is_error === true ? "error" : "result", raw }]);
       } catch {
         return { events: [], protocolError: "Claude returned invalid JSON" };
       }

@@ -53,6 +53,10 @@ describe("ClaudeAdapter", () => {
       sessionId: "s1",
       modelObserved: "claude-sonnet",
       usage: { inputTokens: 3, outputTokens: 1, costUsd: 0.01 },
+      events: [
+        { kind: "session" },
+        { kind: "result" },
+      ],
     });
   });
 });
@@ -113,6 +117,12 @@ describe("CodexAdapter", () => {
       finalText: "OK",
       sessionId: "t1",
       usage: { inputTokens: 5, cachedInputTokens: 2, outputTokens: 1, reasoningOutputTokens: 0 },
+      events: [
+        { kind: "session" },
+        { kind: "status" },
+        { kind: "message" },
+        { kind: "result" },
+      ],
     });
   });
 });
@@ -156,6 +166,16 @@ describe("CursorAdapter", () => {
       providerOptions: { cursor: { trustWorkspace: true } },
     }));
     expect(invocation.args).toContain("--trust");
+  });
+
+  test("requests Cursor sandbox only where the CLI supports it", () => {
+    const invocation = adapter.build(request("cursor", {
+      model: "gpt-5.3-codex-low",
+      access: "edit-isolated",
+    }));
+    expect(invocation.args).toContain("--worktree");
+    if (process.platform === "win32") expect(invocation.args).not.toContain("--sandbox");
+    else expect(invocation.args).toContainAllValues(["--sandbox", "enabled"]);
   });
 
   test("rejects ephemeral sessions and schemas", () => {

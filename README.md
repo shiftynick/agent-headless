@@ -4,11 +4,23 @@ One typed, scriptable interface for running Claude Code, Codex, and Cursor
 Agent headlessly. The package normalizes the intent common to all three CLIs
 while rejecting unsupported combinations instead of silently dropping them.
 
-## Requirements
+## Install and requirements
 
-- Bun 1.2 or newer
+- Node.js 20 or newer
 - One or more authenticated provider CLIs: `claude`, `codex`, or Cursor's
   `agent`
+
+Until the package is published to npm, install a released GitHub checkout or a
+local clone:
+
+```powershell
+npm install --global N:\agent-headless
+# after a release tag is pushed:
+npm install --global github:shiftynick/agent-headless#v0.2.0
+```
+
+Bun is used only to build and test this repository. Consumers execute the
+checked-in `dist/` package with Node.
 
 Environment overrides are supported for nonstandard installs:
 `CLAUDE_BIN`, `CODEX_BIN`, and `CURSOR_AGENT_BIN`.
@@ -16,17 +28,17 @@ Environment overrides are supported for nonstandard installs:
 ## CLI
 
 ```powershell
-bun run src/cli.ts capabilities
-bun run src/cli.ts models cursor
+agent-headless capabilities
+agent-headless models cursor
 
-bun run src/cli.ts run `
+agent-headless run `
   --provider codex `
   --cwd N:\some-project `
   --access inspect `
   --effort medium `
   --prompt "Summarize the repository architecture."
 
-bun run src/cli.ts run `
+agent-headless run `
   --provider cursor `
   --cwd N:\some-project `
   --model gpt-5.3-codex-low `
@@ -57,7 +69,7 @@ assertSucceeded(result);
 console.log(result.finalText, result.usage);
 ```
 
-## Capability boundaries
+## Compatibility matrix
 
 | Capability | Claude | Codex | Cursor |
 | --- | --- | --- | --- |
@@ -70,8 +82,19 @@ console.log(result.finalText, result.usage);
 | JSON Schema output | yes | file-based | unavailable |
 | Per-run budget | yes | unavailable | unavailable |
 
+The same matrix is available programmatically alongside executable status.
+Unsupported edges are rejected rather than ignored: Cursor has no ephemeral
+session or schema output; Codex cannot change access or additional directories
+when resuming and has no `max` effort mapping.
+
 The library never enables provider flags that bypass approvals or sandboxes.
 Write access must be requested explicitly.
+
+Capability probing is runtime evidence, not a static promise. Each report says
+whether the configured executable is `available`, `missing`, or `unusable`, and
+includes the resolved executable path. Provider events retain their raw payload
+while also receiving a stable lifecycle `kind` suitable for supervisors and
+logs.
 
 Codex does not let a resumed invocation replace the original sandbox policy.
 Accordingly, Codex resume calls use `access: "inherit-session"`; asking a
@@ -81,6 +104,10 @@ Cursor workspace trust is also explicit: pass `--trust-workspace` (or
 `providerOptions.cursor.trustWorkspace`) only after the caller has established
 that the selected workspace is trusted. Cursor persists sessions because its
 CLI does not offer an ephemeral mode.
+
+On Windows, Cursor's worktree isolates checkout edits but does not sandbox
+arbitrary shell effects. Treat `edit-isolated` as real host-write authority and
+do not delegate the write when that residual risk is unacceptable.
 
 For Cursor, `effort` resolves to an available exact model variant such as
 `gpt-5.6-terra-low`; it is not blindly appended to the model ID. If the
@@ -93,6 +120,14 @@ model invocation and asks for an exact model ID.
 bun install
 bun run check
 bun run build
+```
+
+`bun run check` also loads the built package under Node and exercises it with a
+deterministic injected executor. Applications can use the same optional second
+argument to `runAgent` to test without spawning a provider:
+
+```ts
+await runAgent(request, { execute: fakeExecutor });
 ```
 
 Live tests are opt-in because they use authenticated model calls:

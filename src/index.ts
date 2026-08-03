@@ -1,38 +1,58 @@
 import { AgentHeadlessError } from "./errors";
 import { getAdapter } from "./adapters";
-import { parseJsonEvent } from "./jsonl";
+import { parseJsonEvent, parseJsonLines } from "./jsonl";
 import { runInvocation } from "./process";
-import type { AgentResult, Provider, ProviderCapabilities, RunRequest } from "./types";
+import type { AgentResult, Provider, ProviderCapabilities, RunAgentOptions, RunRequest } from "./types";
 import { normalizeRequest } from "./validation";
 
 export * from "./errors";
 export * from "./types";
+export { VERSION } from "./version";
 export { ClaudeAdapter, CodexAdapter, CursorAdapter, getAdapter } from "./adapters";
 
-export async function runAgent(input: RunRequest): Promise<AgentResult> {
+export async function runAgent(input: RunRequest, options: RunAgentOptions = {}): Promise<AgentResult> {
   let request = normalizeRequest(input);
   const adapter = getAdapter(request.provider);
   if (adapter.prepare) request = await adapter.prepare(request);
   const invocation = adapter.build(request);
-  const processResult = await runInvocation(invocation, {
+  const streamWarnings: string[] = [];
+  const processResult = await (options.execute ?? runInvocation)(invocation, {
     timeoutMs: request.timeoutMs!,
     ...(request.signal ? { signal: request.signal } : {}),
     ...(request.env ? { env: request.env } : {}),
     ...(invocation.structured && request.onEvent ? {
       onStdoutLine: (line: string) => {
-        try { request.onEvent?.(parseJsonEvent(request.provider, line)); } catch { /* final parsing reports protocol errors */ }
+        try {
+          request.onEvent?.(parseJsonEvent(request.provider, line));
+        } catch {
+          streamWarnings.push("invalid JSONL received during streaming");
+        }
       },
     } : {}),
   });
+
+  const structuredPartial = invocation.structured
+    ? parseJsonLines(request.provider, processResult.stdout)
+    : undefined;
+  const textPartial = invocation.structured
+    ? undefined
+    : adapter.parse(processResult.stdout, false);
+  const partialEvents = structuredPartial?.events ?? textPartial?.events ?? [];
+  const partialFinalText = textPartial?.finalText;
+  const partialWarnings = [...new Set([
+    ...streamWarnings,
+    ...(structuredPartial?.error ? [structuredPartial.error] : []),
+  ])];
 
   if (processResult.timedOut || processResult.cancelled) {
     return {
       provider: request.provider,
       status: processResult.timedOut ? "timed-out" : "cancelled",
-      events: [],
+      ...(partialFinalText !== undefined ? { finalText: partialFinalText } : {}),
+      events: partialEvents,
       exitCode: processResult.exitCode,
       ...(request.model ? { modelRequested: request.model } : {}),
-      warnings: [],
+      warnings: partialWarnings,
       stderr: processResult.stderr,
       durationMs: processResult.durationMs,
     };
@@ -42,10 +62,11 @@ export async function runAgent(input: RunRequest): Promise<AgentResult> {
     return {
       provider: request.provider,
       status: "failed",
-      events: [],
+      ...(partialFinalText !== undefined ? { finalText: partialFinalText } : {}),
+      events: partialEvents,
       exitCode: processResult.exitCode,
       ...(request.model ? { modelRequested: request.model } : {}),
-      warnings: [],
+      warnings: partialWarnings,
       stderr: processResult.stderr,
       durationMs: processResult.durationMs,
     };
@@ -53,7 +74,7 @@ export async function runAgent(input: RunRequest): Promise<AgentResult> {
 
   const parsed = adapter.parse(processResult.stdout, invocation.structured);
   if (!invocation.structured) for (const event of parsed.events) request.onEvent?.(event);
-  const warnings = parsed.protocolError ? [parsed.protocolError] : [];
+  const warnings = [...new Set([...streamWarnings, ...(parsed.protocolError ? [parsed.protocolError] : [])])];
   return {
     provider: request.provider,
     status: parsed.protocolError ? "failed" : "succeeded",

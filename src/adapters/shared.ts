@@ -20,7 +20,7 @@ export function assertSession(request: RunRequest, allowed: Array<SessionMode["m
 }
 
 export function textOutput(provider: Provider, stdout: string): ParsedOutput {
-  return { finalText: stdout.replace(/\r?\n$/u, ""), events: [{ provider, type: "result", raw: stdout }] };
+  return { finalText: stdout.replace(/\r?\n$/u, ""), events: [{ provider, type: "result", kind: "result", raw: stdout }] };
 }
 
 export function providerFailure(provider: Provider, exitCode: number | null, stderr: string): AgentHeadlessError {

@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { AgentHeadlessError } from "./errors";
-import type { Invocation, Provider } from "./types";
+import type { Invocation, Provider, ProviderAvailability } from "./types";
 
 export interface ProcessResult {
   stdout: string;
@@ -11,6 +11,13 @@ export interface ProcessResult {
   durationMs: number;
   timedOut: boolean;
   cancelled: boolean;
+}
+
+export interface ExecutableProbe {
+  executable: string;
+  availability: ProviderAvailability;
+  version?: string;
+  reason?: string;
 }
 
 export function resolveOnWindows(command: string, env: NodeJS.ProcessEnv): string {
@@ -80,6 +87,7 @@ export async function runInvocation(
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
       windowsVerbatimArguments,
+      detached: process.platform !== "win32",
     });
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
@@ -94,9 +102,26 @@ export async function runInvocation(
     });
     child.stderr.on("data", (chunk: string) => { stderr += chunk; });
 
+    let terminationRequested = false;
+    let forceTimer: NodeJS.Timeout | undefined;
+    const forceKill = () => {
+      if (!child.pid) return;
+      if (process.platform === "win32") {
+        const killer = spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], { windowsHide: true });
+        killer.on("error", () => { child.kill(); });
+      } else {
+        try { process.kill(-child.pid, "SIGKILL"); } catch { child.kill("SIGKILL"); }
+      }
+    };
     const terminate = () => {
+      if (terminationRequested) return;
+      terminationRequested = true;
       if (process.platform === "win32" && child.pid) {
-        spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], { windowsHide: true });
+        forceKill();
+      } else if (child.pid) {
+        try { process.kill(-child.pid, "SIGTERM"); } catch { child.kill("SIGTERM"); }
+        forceTimer = setTimeout(forceKill, 2_000);
+        forceTimer.unref();
       } else {
         child.kill("SIGTERM");
       }
@@ -108,6 +133,7 @@ export async function runInvocation(
     child.stdin.end(invocation.stdin, "utf8");
     child.on("error", (error: NodeJS.ErrnoException) => {
       clearTimeout(timer);
+      if (forceTimer) clearTimeout(forceTimer);
       options.signal?.removeEventListener("abort", abort);
       if (error.code === "ENOENT") {
         reject(new AgentHeadlessError("not_installed", `${invocation.provider} executable not found: ${invocation.command}`, { cause: error }));
@@ -117,6 +143,7 @@ export async function runInvocation(
     });
     child.on("close", (exitCode) => {
       clearTimeout(timer);
+      if (forceTimer) clearTimeout(forceTimer);
       options.signal?.removeEventListener("abort", abort);
       if (options.onStdoutLine && pendingLine.trim()) options.onStdoutLine(pendingLine);
       resolve({ stdout, stderr, exitCode, durationMs: Date.now() - started, timedOut, cancelled });
@@ -125,13 +152,32 @@ export async function runInvocation(
 }
 
 export async function readVersion(provider: Provider, command: string, cwd: string): Promise<string | undefined> {
+  return (await probeExecutable(provider, command, cwd)).version;
+}
+
+export async function probeExecutable(provider: Provider, command: string, cwd: string): Promise<ExecutableProbe> {
+  const env = { ...process.env };
+  const executable = resolveOnWindows(command, env);
   try {
     const result = await runInvocation(
       { provider, command, args: ["--version"], cwd, stdin: "", structured: false },
       { timeoutMs: 10_000 },
     );
-    return result.exitCode === 0 ? result.stdout.trim() : undefined;
-  } catch {
-    return undefined;
+    if (result.exitCode !== 0) {
+      return {
+        executable,
+        availability: "unusable",
+        reason: result.stderr.trim() || `${provider} --version exited with ${String(result.exitCode)}`,
+      };
+    }
+    const version = result.stdout.trim();
+    return { executable, availability: "available", ...(version ? { version } : {}) };
+  } catch (error) {
+    const missing = error instanceof AgentHeadlessError && error.code === "not_installed";
+    return {
+      executable,
+      availability: missing ? "missing" : "unusable",
+      reason: error instanceof Error ? error.message : String(error),
+    };
   }
 }

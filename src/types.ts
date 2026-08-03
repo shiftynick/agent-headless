@@ -2,6 +2,8 @@ export type Provider = "claude" | "codex" | "cursor";
 export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
 export type AccessMode = "answer-only" | "inspect" | "edit-workspace" | "edit-isolated" | "inherit-session";
 export type OutputMode = "text" | "events";
+export type AgentEventKind = "session" | "message" | "tool" | "status" | "result" | "error" | "unknown";
+export type ProviderAvailability = "available" | "missing" | "unusable";
 
 export type SessionMode =
   | { mode: "ephemeral" }
@@ -47,6 +49,7 @@ export interface AgentUsage {
 export interface AgentEvent {
   provider: Provider;
   type: string;
+  kind: AgentEventKind;
   raw: unknown;
 }
 
@@ -69,6 +72,8 @@ export interface ProviderCapabilities {
   provider: Provider;
   version?: string;
   executable: string;
+  availability: ProviderAvailability;
+  availabilityReason?: string;
   access: AccessMode[];
   sessions: Array<SessionMode["mode"]>;
   supportsModel: boolean;
@@ -76,6 +81,27 @@ export interface ProviderCapabilities {
   supportsSchema: boolean;
   supportsModelListing: boolean;
 }
+
+export interface RunAgentOptions {
+  execute?: InvocationExecutor;
+}
+
+export type InvocationExecutor = (
+  invocation: Invocation,
+  options: {
+    timeoutMs: number;
+    signal?: AbortSignal;
+    env?: Record<string, string | undefined>;
+    onStdoutLine?: (line: string) => void;
+  },
+) => Promise<{
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+  durationMs: number;
+  timedOut: boolean;
+  cancelled: boolean;
+}>;
 
 export interface Invocation {
   provider: Provider;

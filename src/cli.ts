@@ -1,7 +1,7 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 import { readFileSync } from "node:fs";
 import process from "node:process";
-import { AgentHeadlessError, getAllCapabilities, getCapabilities, listModels, runAgent } from "./index";
+import { AgentHeadlessError, getAllCapabilities, getCapabilities, listModels, runAgent, VERSION } from "./index";
 import type { AccessMode, Effort, OutputMode, Provider, RunRequest, SessionMode } from "./types";
 
 const help = `agent-headless - one headless interface for Claude, Codex, and Cursor
@@ -10,6 +10,7 @@ Usage:
   agent-headless run --provider <claude|codex|cursor> --prompt <text> [options]
   agent-headless capabilities [provider]
   agent-headless models cursor
+  agent-headless --version
 
 Run options:
   --prompt <text>                 Prompt text; omit to read stdin
@@ -113,14 +114,23 @@ async function main(): Promise<void> {
     console.log(help);
     return;
   }
+  if (command === "--version" || command === "-v") {
+    console.log(VERSION);
+    return;
+  }
   if (command === "capabilities") {
     const provider = args[0] as Provider | undefined;
+    if (provider && !["claude", "codex", "cursor"].includes(provider)) {
+      throw new AgentHeadlessError("invalid_request", "capabilities provider must be claude, codex, or cursor");
+    }
     console.log(JSON.stringify(provider ? await getCapabilities(provider) : await getAllCapabilities(), null, 2));
     return;
   }
   if (command === "models") {
     const provider = args[0] as Provider | undefined;
-    if (!provider) throw new AgentHeadlessError("invalid_request", "models requires a provider");
+    if (!provider || !["claude", "codex", "cursor"].includes(provider)) {
+      throw new AgentHeadlessError("invalid_request", "models provider must be claude, codex, or cursor");
+    }
     console.log((await listModels(provider)).join("\n"));
     return;
   }

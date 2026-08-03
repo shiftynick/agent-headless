@@ -1,6 +1,6 @@
 import { unsupported } from "../errors";
 import { asRecord, numberValue, parseJsonLines } from "../jsonl";
-import { readVersion, runInvocation } from "../process";
+import { probeExecutable, runInvocation } from "../process";
 import type { AgentUsage, Invocation, ParsedOutput, ProviderAdapter, ProviderCapabilities, RunRequest } from "../types";
 import { assertAccess, assertSession, envExecutable, textOutput } from "./shared";
 
@@ -37,11 +37,13 @@ export class CursorAdapter implements ProviderAdapter {
   readonly provider = "cursor" as const;
 
   async capabilities(executable = envExecutable(this.provider)): Promise<ProviderCapabilities> {
-    const version = await readVersion(this.provider, executable, process.cwd());
+    const probe = await probeExecutable(this.provider, executable, process.cwd());
     return {
       provider: this.provider,
-      executable,
-      ...(version ? { version } : {}),
+      executable: probe.executable,
+      availability: probe.availability,
+      ...(probe.version ? { version: probe.version } : {}),
+      ...(probe.reason ? { availabilityReason: probe.reason } : {}),
       access: ["answer-only", "inspect", "edit-isolated"],
       sessions: ["persistent", "resume"],
       supportsModel: true,
@@ -103,7 +105,7 @@ export class CursorAdapter implements ProviderAdapter {
       args.push("--worktree");
       if (options?.worktreeName) args.push(options.worktreeName);
       if (options?.worktreeBase) args.push("--worktree-base", options.worktreeBase);
-      args.push("--sandbox", "enabled");
+      if (process.platform !== "win32") args.push("--sandbox", "enabled");
     }
     if (request.session!.mode === "persistent" && request.session!.id) {
       unsupported("Cursor cannot select a session ID when starting a persistent session");

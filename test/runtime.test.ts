@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { runAgent } from "../src";
+import { getCapabilities, runAgent } from "../src";
 
 const fakeClaude = path.join(import.meta.dir, "fixtures", "fake-claude.cmd");
 
@@ -44,5 +44,19 @@ test("an already-aborted signal never launches the provider", async () => {
     expect(existsSync(marker)).toBe(false);
   } finally {
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("capability probing launches a Windows cmd shim and reports resolved availability", async () => {
+  if (process.platform !== "win32") return;
+  const previous = process.env.CLAUDE_BIN;
+  process.env.CLAUDE_BIN = fakeClaude;
+  try {
+    const capabilities = await getCapabilities("claude");
+    expect(capabilities.availability).toBe("available");
+    expect(capabilities.executable).toEndWith("fake-claude.cmd");
+  } finally {
+    if (previous === undefined) delete process.env.CLAUDE_BIN;
+    else process.env.CLAUDE_BIN = previous;
   }
 });
