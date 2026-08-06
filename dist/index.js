@@ -79,13 +79,15 @@ function numberValue(value) {
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
+function foldEnvName(name) {
+  return process.platform === "win32" ? name.toLowerCase() : name;
+}
 function lastEnvMatch(env, name) {
-  const fold = process.platform === "win32";
-  const target = fold ? name.toLowerCase() : name;
+  const target = foldEnvName(name);
   let matched = false;
   let value;
   for (const key of Object.keys(env)) {
-    if ((fold ? key.toLowerCase() : key) === target) {
+    if (foldEnvName(key) === target) {
       matched = true;
       value = env[key];
     }
@@ -114,7 +116,7 @@ function resolveOnWindows(command, env) {
 function effectiveEnv(overrides) {
   const env = { ...process.env };
   for (const [key, value] of Object.entries(overrides ?? {})) {
-    const existing = process.platform === "win32" ? Object.keys(env).find((candidate) => candidate.toLowerCase() === key.toLowerCase()) : key;
+    const existing = process.platform === "win32" ? Object.keys(env).find((candidate) => foldEnvName(candidate) === foldEnvName(key)) : key;
     if (existing && existing !== key)
       delete env[existing];
     if (value === undefined)
@@ -668,13 +670,11 @@ function gitToplevel(cwd, env) {
 function envKeyPart(env) {
   if (!env)
     return null;
-  const fold = process.platform === "win32";
-  const resolved = new Map;
-  for (const [name, value] of Object.entries(env)) {
-    const key = fold ? name.toLowerCase() : name;
-    resolved.set(key, value === undefined ? [key] : [key, value]);
-  }
-  return [...resolved.keys()].sort().map((key) => resolved.get(key));
+  const names = [...new Set(Object.keys(env).map(foldEnvName))].sort();
+  return names.map((name) => {
+    const { value } = lastEnvMatch(env, name);
+    return value === undefined ? [name] : [name, value];
+  });
 }
 var repoSlugCache = new Map;
 function repoSlugKey(cwd, env) {

@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { unsupported } from "../errors";
 import { asRecord, numberValue, parseJsonLines } from "../jsonl";
-import { effectiveEnv, probeExecutable, resolveCommand, runInvocation, lastEnvMatch } from "../process";
+import { effectiveEnv, foldEnvName, lastEnvMatch, probeExecutable, resolveCommand, runInvocation } from "../process";
 import type {
   AgentUsage,
   Invocation,
@@ -209,20 +209,14 @@ function gitToplevel(cwd: string, env?: Record<string, string | undefined>): str
  */
 function envKeyPart(env?: Record<string, string | undefined>): (string[])[] | null {
   if (!env) return null;
-  // The key must encode the overlay as effectiveEnv RESOLVES it, not as it was
-  // written. On Windows, differently cased duplicates of one variable resolve
-  // by insertion order (last wins), so sorting the raw entries would give two
-  // different effective environments the same key - and a colliding cache can
-  // reuse a stale answer, which for the repo-slug memo means a false
-  // "no worktree can exist". Fold names case-insensitively there, letting
-  // later entries overwrite earlier ones, before sorting.
-  const fold = process.platform === "win32";
-  const resolved = new Map<string, string[]>();
-  for (const [name, value] of Object.entries(env)) {
-    const key = fold ? name.toLowerCase() : name;
-    resolved.set(key, value === undefined ? [key] : [key, value]);
-  }
-  return [...resolved.keys()].sort().map((key) => resolved.get(key)!);
+  // Folding and winner selection are not reimplemented here: foldEnvName
+  // decides which names are the same variable and lastEnvMatch decides which
+  // entry wins, so this key cannot drift from how the overlay resolves.
+  const names = [...new Set(Object.keys(env).map(foldEnvName))].sort();
+  return names.map((name) => {
+    const { value } = lastEnvMatch(env, name);
+    return value === undefined ? [name] : [name, value];
+  });
 }
 
 /**

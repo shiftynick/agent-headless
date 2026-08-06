@@ -21,6 +21,8 @@ export interface ExecutableProbe {
  * exactly how an equivalent overlay ends up resolving differently here than
  * it does for the provider.
  */
+/** The one definition of when two environment names are the same variable. */
+export declare function foldEnvName(name: string): string;
 /**
  * The one matching rule for reading a variable out of an overlay or an
  * environment object: case-insensitive on win32, exact elsewhere, and the

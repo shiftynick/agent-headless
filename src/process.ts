@@ -28,6 +28,11 @@ export interface ExecutableProbe {
  * exactly how an equivalent overlay ends up resolving differently here than
  * it does for the provider.
  */
+/** The one definition of when two environment names are the same variable. */
+export function foldEnvName(name: string): string {
+  return process.platform === "win32" ? name.toLowerCase() : name;
+}
+
 /**
  * The one matching rule for reading a variable out of an overlay or an
  * environment object: case-insensitive on win32, exact elsewhere, and the
@@ -40,12 +45,11 @@ export function lastEnvMatch(
   env: Record<string, string | undefined>,
   name: string,
 ): { matched: boolean; value: string | undefined } {
-  const fold = process.platform === "win32";
-  const target = fold ? name.toLowerCase() : name;
+  const target = foldEnvName(name);
   let matched = false;
   let value: string | undefined;
   for (const key of Object.keys(env)) {
-    if ((fold ? key.toLowerCase() : key) === target) {
+    if (foldEnvName(key) === target) {
       matched = true;
       value = env[key];
     }
@@ -85,7 +89,7 @@ export function effectiveEnv(overrides?: Record<string, string | undefined>): No
   const env: NodeJS.ProcessEnv = { ...process.env };
   for (const [key, value] of Object.entries(overrides ?? {})) {
     const existing = process.platform === "win32"
-      ? Object.keys(env).find((candidate) => candidate.toLowerCase() === key.toLowerCase())
+      ? Object.keys(env).find((candidate) => foldEnvName(candidate) === foldEnvName(key))
       : key;
     if (existing && existing !== key) delete env[existing];
     if (value === undefined) delete env[key];
