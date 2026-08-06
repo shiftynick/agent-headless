@@ -30,11 +30,15 @@ export interface ExecutableProbe {
  */
 export function envValue(env: NodeJS.ProcessEnv, name: string): string | undefined {
   if (process.platform !== "win32") return env[name];
+  // Last match wins, mirroring effectiveEnv, where a later case-variant entry
+  // overwrites an earlier one. A first-match read here would resolve
+  // {CLAUDE_BIN: "A", claude_bin: "B"} to A while the child sees B.
   const lower = name.toLowerCase();
+  let value: string | undefined;
   for (const key of Object.keys(env)) {
-    if (key.toLowerCase() === lower) return env[key];
+    if (key.toLowerCase() === lower) value = env[key];
   }
-  return undefined;
+  return value;
 }
 
 export function resolveOnWindows(command: string, env: NodeJS.ProcessEnv): string {

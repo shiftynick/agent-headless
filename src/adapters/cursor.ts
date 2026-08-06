@@ -108,11 +108,16 @@ export const CURSOR_WORKTREE_NAME_PATTERN = /^[A-Za-z0-9._-]+$/u;
  * reason it is there: Windows environment variables are.
  */
 function childEnvValue(name: string, env?: Record<string, string | undefined>): string | undefined {
+  // Last match wins, mirroring effectiveEnv. A deleted-last duplicate
+  // ({X: "value", x: undefined}) therefore reads as deleted, exactly as the
+  // child would see it.
+  let matched = false;
+  let value: string | undefined;
   for (const key of Object.keys(env ?? {})) {
     const matches = process.platform === "win32" ? key.toLowerCase() === name.toLowerCase() : key === name;
-    if (matches) return env![key];
+    if (matches) { matched = true; value = env![key]; }
   }
-  return process.env[name];
+  return matched ? value : process.env[name];
 }
 
 /**

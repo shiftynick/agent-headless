@@ -831,3 +831,26 @@ describe("environment reads mirror Windows case-insensitivity", () => {
     expect(envValue({ path: "/x" }, "PATH")).toBeUndefined();
   });
 });
+
+describe("case-variant duplicates resolve last-wins, matching effectiveEnv", () => {
+  const winOnly = process.platform === "win32" ? test : test.skip;
+
+  winOnly("a later case-variant provider-bin entry wins", () => {
+    expect(envExecutable("claude", { CLAUDE_BIN: "A", claude_bin: "B" })).toBe("B");
+    expect(envExecutable("claude", { claude_bin: "B", CLAUDE_BIN: "A" })).toBe("A");
+  });
+
+  winOnly("envValue itself is last-wins for duplicates", () => {
+    expect(envValue({ PATH: "A", pAtH: "B" }, "PATH")).toBe("B");
+  });
+
+  winOnly("a later case-variant worktrees-root entry wins", () => {
+    expect(cursorWorktreesRoot({ CURSOR_WORKTREES_ROOT: "X:\one", cursor_worktrees_root: "X:\two" }))
+      .toBe("X:\two");
+  });
+
+  winOnly("a deleted-last duplicate reads as deleted, falling to the default", () => {
+    const root = cursorWorktreesRoot({ CURSOR_WORKTREES_ROOT: "X:\gone", cursor_worktrees_root: undefined });
+    expect(root).not.toBe("X:\gone");
+  });
+});

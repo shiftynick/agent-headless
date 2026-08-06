@@ -83,11 +83,12 @@ function envValue(env, name) {
   if (process.platform !== "win32")
     return env[name];
   const lower = name.toLowerCase();
+  let value;
   for (const key of Object.keys(env)) {
     if (key.toLowerCase() === lower)
-      return env[key];
+      value = env[key];
   }
-  return;
+  return value;
 }
 function resolveOnWindows(command, env) {
   if (process.platform !== "win32" || path.isAbsolute(command) || /[\\/]/u.test(command))
@@ -608,12 +609,16 @@ function withDefaultWorktreeName(request, generate) {
 var CURSOR_WORKTREES_ROOT_ENV = "CURSOR_WORKTREES_ROOT";
 var CURSOR_WORKTREE_NAME_PATTERN = /^[A-Za-z0-9._-]+$/u;
 function childEnvValue(name, env) {
+  let matched = false;
+  let value;
   for (const key of Object.keys(env ?? {})) {
     const matches = process.platform === "win32" ? key.toLowerCase() === name.toLowerCase() : key === name;
-    if (matches)
-      return env[key];
+    if (matches) {
+      matched = true;
+      value = env[key];
+    }
   }
-  return process.env[name];
+  return matched ? value : process.env[name];
 }
 function cursorWorktreesRoot(env) {
   const configured = childEnvValue(CURSOR_WORKTREES_ROOT_ENV, env);
