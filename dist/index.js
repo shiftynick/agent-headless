@@ -652,7 +652,15 @@ function gitToplevel(cwd, env) {
   }
 }
 function envKeyPart(env) {
-  return env ? Object.keys(env).sort().map((name) => env[name] === undefined ? [name] : [name, env[name]]) : null;
+  if (!env)
+    return null;
+  const fold = process.platform === "win32";
+  const resolved = new Map;
+  for (const [name, value] of Object.entries(env)) {
+    const key = fold ? name.toLowerCase() : name;
+    resolved.set(key, value === undefined ? [key] : [key, value]);
+  }
+  return [...resolved.keys()].sort().map((key) => resolved.get(key));
 }
 var repoSlugCache = new Map;
 function repoSlugKey(cwd, env) {

@@ -208,9 +208,21 @@ function gitToplevel(cwd: string, env?: Record<string, string | undefined>): str
  * which is again distinct from an empty one.
  */
 function envKeyPart(env?: Record<string, string | undefined>): (string[])[] | null {
-  return env
-    ? Object.keys(env).sort().map((name) => (env[name] === undefined ? [name] : [name, env[name]!]))
-    : null;
+  if (!env) return null;
+  // The key must encode the overlay as effectiveEnv RESOLVES it, not as it was
+  // written. On Windows, differently cased duplicates of one variable resolve
+  // by insertion order (last wins), so sorting the raw entries would give two
+  // different effective environments the same key - and a colliding cache can
+  // reuse a stale answer, which for the repo-slug memo means a false
+  // "no worktree can exist". Fold names case-insensitively there, letting
+  // later entries overwrite earlier ones, before sorting.
+  const fold = process.platform === "win32";
+  const resolved = new Map<string, string[]>();
+  for (const [name, value] of Object.entries(env)) {
+    const key = fold ? name.toLowerCase() : name;
+    resolved.set(key, value === undefined ? [key] : [key, value]);
+  }
+  return [...resolved.keys()].sort().map((key) => resolved.get(key)!);
 }
 
 /**

@@ -760,3 +760,36 @@ describe("Cursor model listing memoization (real cache path)", () => {
     expect(calls()).toBe(before + 1);
   }, 30_000);
 });
+
+describe("memo keys under Windows case-insensitive resolution", () => {
+  // effectiveEnv resolves case-insensitive duplicates by insertion order, so
+  // two overlays that resolve differently must never share a cache key, and
+  // two that resolve identically should. A key built by sorting the RAW
+  // entries collides on exactly the first case.
+  const winOnly = process.platform === "win32" ? test : test.skip;
+
+  winOnly("case-variant overlays that resolve differently get different keys", () => {
+    const a = modelListingKey("git", { PATH: "A", Path: "B" }); // resolves Path=B
+    const b = modelListingKey("git", { Path: "B", PATH: "A" }); // resolves PATH=A
+    expect(a).not.toBe(b);
+  });
+
+  winOnly("overlays with identical resolution share one key", () => {
+    const a = modelListingKey("git", { PATH: "A", Path: "B" }); // resolves Path=B
+    const b = modelListingKey("git", { Path: "B" });            // resolves Path=B
+    expect(a).toBe(b);
+  });
+
+  winOnly("a case-variant deletion that resolves differently is distinct", () => {
+    const a = modelListingKey("git", { PATH: "A", Path: undefined }); // deletes
+    const b = modelListingKey("git", { Path: undefined, PATH: "A" }); // sets A
+    expect(a).not.toBe(b);
+  });
+
+  test("case-sensitive platforms keep distinct names distinct", () => {
+    if (process.platform === "win32") return;
+    const a = modelListingKey("git", { PATH: "A", Path: "B" });
+    const b = modelListingKey("git", { Path: "B", PATH: "A" });
+    expect(a).toBe(b); // same set of (name,value) pairs; order alone must not split the cache
+  });
+});
