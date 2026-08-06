@@ -476,6 +476,43 @@ test("a worktree path the provider discloses beats the derived one", async () =>
   expect(result.workspace.worktreeRoot).toBeUndefined();
 });
 
+test("a disclosed path is reported only once it is absolute", async () => {
+  const relative = [
+    JSON.stringify({ type: "system", subtype: "init", session_id: "c3", model: "gpt-5", cwd: process.cwd() }),
+    JSON.stringify({ type: "assistant", subtype: "message", worktree_path: "relative-worktree" }),
+    JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "done", session_id: "c3" }),
+  ].join("\n");
+  const resolved = await runAgent(isolatedCursor, stubbed(relative));
+
+  // `WorkspaceInfo.worktree` promises an absolute path. A provider prints a
+  // relative one against its own working directory, which is this run's cwd,
+  // so that is what it resolves against - reporting "relative-worktree"
+  // verbatim hands the caller a string that means nothing outside that cwd.
+  expect(resolved.workspace.worktree).toBe(path.resolve(process.cwd(), "relative-worktree"));
+  expect(path.isAbsolute(resolved.workspace.worktree!)).toBe(true);
+  expect(resolved.workspace.worktreeSource).toBe("reported");
+
+  // An already-absolute disclosure is still authoritative and untouched.
+  const absolute = await runAgent(isolatedCursor, stubbed(cursorSuccess));
+  expect(absolute.workspace.worktree).toBe("/repo/.worktrees/task-018");
+  expect(path.isAbsolute(absolute.workspace.worktree!)).toBe(true);
+});
+
+test("an unusable disclosure falls back to the derived path rather than being reported", async () => {
+  const result = await runAgent(
+    { ...bareCursor, model: "gpt-5", access: "edit-isolated" },
+    {
+      ...stubbed('preparing worktree {"worktree_path":"   "} ...\nstill not jsonl'),
+      generateWorktreeName: () => "agent-headless-fixed-10",
+    },
+  );
+
+  // A blank disclosure names nothing; it must not win over - or suppress - the
+  // path the runner can still compute from the pinned name and Cursor's layout.
+  expect(result.workspace.worktree).toBe(cursorWorktreeLocation(process.cwd(), "agent-headless-fixed-10"));
+  expect(result.workspace.worktreeSource).toBe("derived");
+});
+
 test("a caller-supplied worktree name and base are honored, and the base stays a Git ref", async () => {
   const options = capturing("banner one\nbanner two");
   const result = await runAgent(

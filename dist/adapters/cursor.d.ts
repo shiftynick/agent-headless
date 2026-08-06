@@ -50,11 +50,15 @@ export declare const CURSOR_WORKTREE_NAME_PATTERN: RegExp;
 export declare function cursorWorktreesRoot(env?: Record<string, string | undefined>): string | undefined;
 /**
  * The per-repository directory Cursor nests worktrees in: the slugified base
- * name of the repository root. Cursor finds that root with
- * `git rev-parse --show-toplevel`; walking up for a `.git` entry finds the same
- * directory (a linked worktree or submodule has a `.git` *file* at its root)
- * without spending a subprocess on every run. Returns `undefined` outside a Git
- * repository, where an isolated Cursor run cannot start at all.
+ * name of the repository root. Returns `undefined` wherever Cursor could not
+ * start an isolated run - outside a Git repository, or where a `.git` entry
+ * exists but is not a usable one. Accepting a bare `.git` entry as proof of a
+ * repository would derive a path no worktree can ever occupy, which is exactly
+ * the fabrication this runner promises never to commit.
+ *
+ * Memoized per resolved `cwd` for the process lifetime, so a directory that
+ * becomes (or stops being) a repository mid-process keeps its first answer -
+ * the same lifetime contract the model listing memo carries.
  */
 export declare function cursorRepoSlug(cwd: string): string | undefined;
 /**
@@ -67,7 +71,7 @@ export declare function cursorRepoSlug(cwd: string): string | undefined;
  *
  * `undefined` (never a guess) when any input is missing: a non-isolated or
  * non-Cursor request, a name Cursor would reject, no determinable root, or a
- * cwd outside a Git repository.
+ * cwd `git rev-parse --show-toplevel` does not resolve to a repository root.
  */
 export declare function cursorWorktreePath(request: RunRequest, cwd?: string): string | undefined;
 /**

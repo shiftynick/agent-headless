@@ -57,6 +57,26 @@ function worktreeFromText(stdout: string, worktreeName?: string): string | undef
 }
 
 /**
+ * Makes a provider-disclosed path satisfy `WorkspaceInfo.worktree`'s absolute-path
+ * guarantee, or rejects it. A provider may print a path relative to its own
+ * working directory - which is this run's `cwd` - so that is what a relative one
+ * resolves against. `undefined` when nothing meaningful is left to resolve
+ * (blank), so the caller can fall back to the derived path instead of reporting
+ * a string no consumer could `cd` into.
+ */
+function absoluteReported(disclosed: string | undefined, cwd: string): string | undefined {
+  if (disclosed === undefined) return undefined;
+  const trimmed = disclosed.trim();
+  if (!trimmed) return undefined;
+  // An already-absolute path passes through untouched: the provider is
+  // authoritative about where it put the work, and resolving would only risk
+  // rewriting it.
+  if (path.isAbsolute(trimmed)) return trimmed;
+  const resolved = path.resolve(cwd, trimmed);
+  return path.isAbsolute(resolved) ? resolved : undefined;
+}
+
+/**
  * Describes where a run's work went. Always reports cwd and access; for isolated
  * runs it also reports the worktree name/base the runner chose (known regardless
  * of output readability) and the worktree path itself.
@@ -66,6 +86,10 @@ function worktreeFromText(stdout: string, worktreeName?: string): string | undef
  * from the pinned name and Cursor's fixed worktree layout. Deriving is what
  * makes the path survive the case the parsed path cannot: output that could not
  * be read at all, which is exactly when a caller most needs to find the work.
+ *
+ * A disclosed path is only preferred once it can be made absolute (see
+ * `absoluteReported`); one that cannot falls back to the derived path, or to
+ * reporting no path at all. `worktree` is therefore always absolute.
  */
 export function describeWorkspace(
   request: RunRequest,
@@ -83,9 +107,12 @@ export function describeWorkspace(
         ? request.providerOptions?.claude?.worktreeName ?? "agent-headless"
         : undefined;
   const worktreeBase = isolated && request.provider === "cursor" ? cursor?.worktreeBase : undefined;
-  const reported = isolated
+  const disclosed = isolated
     ? worktreeFromEvents(events, cwd) ?? worktreeFromText(stdout, worktreeName)
     : undefined;
+  // A disclosed path only beats the derived one once it is absolute; an
+  // unusable disclosure falls through to deriving rather than being reported.
+  const reported = absoluteReported(disclosed, cwd);
   const derived = isolated && !reported ? cursorWorktreePath(request, cwd) : undefined;
   const worktree = reported ?? derived;
   return {

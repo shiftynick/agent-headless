@@ -548,6 +548,7 @@ class CodexAdapter {
 }
 
 // src/adapters/cursor.ts
+import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync as existsSync2 } from "node:fs";
 import { homedir } from "node:os";
@@ -613,16 +614,43 @@ function slugifyRepoName(name) {
   const slug = name.toLowerCase().replace(/[^a-z0-9._-]+/gu, "-").replace(/-+/gu, "-").replace(/^-+|-+$/gu, "");
   return slug || "worktree";
 }
-function cursorRepoSlug(cwd) {
-  let current = path3.resolve(cwd);
+function hasGitAncestor(start) {
+  let current = start;
   for (;; ) {
     if (existsSync2(path3.join(current, ".git")))
-      return slugifyRepoName(path3.basename(current));
+      return true;
     const parent = path3.dirname(current);
     if (parent === current)
-      return;
+      return false;
     current = parent;
   }
+}
+function gitToplevel(cwd) {
+  try {
+    const result = spawnSync("git", ["rev-parse", "--show-toplevel"], {
+      cwd,
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: 1e4
+    });
+    if (result.error || result.status !== 0)
+      return;
+    const toplevel = result.stdout.trim();
+    return toplevel ? path3.resolve(toplevel) : undefined;
+  } catch {
+    return;
+  }
+}
+var repoSlugCache = new Map;
+function cursorRepoSlug(cwd) {
+  const start = path3.resolve(cwd);
+  const cached = repoSlugCache.get(start);
+  if (cached !== undefined || repoSlugCache.has(start))
+    return cached;
+  const toplevel = hasGitAncestor(start) ? gitToplevel(start) : undefined;
+  const slug = toplevel === undefined ? undefined : slugifyRepoName(path3.basename(toplevel));
+  repoSlugCache.set(start, slug);
+  return slug;
 }
 function cursorWorktreePath(request, cwd = request.cwd) {
   if (request.provider !== "cursor" || request.access !== "edit-isolated")
@@ -887,12 +915,24 @@ function worktreeFromText(stdout, worktreeName) {
     return;
   return match[0].includes("\\\\") ? match[0].replace(/\\\\/gu, "\\") : match[0];
 }
+function absoluteReported(disclosed, cwd) {
+  if (disclosed === undefined)
+    return;
+  const trimmed = disclosed.trim();
+  if (!trimmed)
+    return;
+  if (path4.isAbsolute(trimmed))
+    return trimmed;
+  const resolved = path4.resolve(cwd, trimmed);
+  return path4.isAbsolute(resolved) ? resolved : undefined;
+}
 function describeWorkspace(request, cwd, events, stdout) {
   const isolated = request.access === "edit-isolated";
   const cursor = request.providerOptions?.cursor;
   const worktreeName = !isolated ? undefined : request.provider === "cursor" ? cursor?.worktreeName : request.provider === "claude" ? request.providerOptions?.claude?.worktreeName ?? "agent-headless" : undefined;
   const worktreeBase = isolated && request.provider === "cursor" ? cursor?.worktreeBase : undefined;
-  const reported = isolated ? worktreeFromEvents(events, cwd) ?? worktreeFromText(stdout, worktreeName) : undefined;
+  const disclosed = isolated ? worktreeFromEvents(events, cwd) ?? worktreeFromText(stdout, worktreeName) : undefined;
+  const reported = absoluteReported(disclosed, cwd);
   const derived = isolated && !reported ? cursorWorktreePath(request, cwd) : undefined;
   const worktree = reported ?? derived;
   return {

@@ -131,7 +131,10 @@ A name is not a location, so the runner also reports `workspace.worktree`, an
 absolute path, on every outcome:
 
 - `workspace.worktreeSource === "reported"` - the provider disclosed the path and
-  it wins, because the provider is authoritative about where it put the work.
+  it wins, because the provider is authoritative about where it put the work. A
+  disclosed path is made absolute first - a relative one resolves against the
+  run's `cwd` - so the field is absolute whatever the provider printed; a
+  disclosure with nothing to resolve falls back to the derived path.
 - `workspace.worktreeSource === "derived"` - the runner constructed the path from
   the pinned name and Cursor's fixed layout,
   `<CURSOR_WORKTREES_ROOT|~/.cursor/worktrees>/<repo-slug>/<name>`, where
@@ -147,8 +150,10 @@ absolute path, on every outcome:
 the worktree branches from, **not** a directory. Cursor has no flag for the
 location; export `CURSOR_WORKTREES_ROOT` (honoured through `request.env`) to
 move it. `workspace.worktree` is omitted rather than guessed when no worktree can
-exist - a `worktreeName` outside Cursor's `[A-Za-z0-9._-]+`, a `cwd` outside a Git
-repository, or no resolvable home directory - and, for Claude's `--worktree`,
+exist - a `worktreeName` outside Cursor's `[A-Za-z0-9._-]+`, a `cwd` that
+`git rev-parse --show-toplevel` does not resolve to a repository root (so an
+empty or malformed `.git` entry derives nothing), or no resolvable home
+directory - and, for Claude's `--worktree`,
 whenever its output discloses no path, since Claude documents no fixed layout.
 
 `cursorWorktreePath`, `cursorWorktreesRoot` and `cursorRepoSlug` are exported for

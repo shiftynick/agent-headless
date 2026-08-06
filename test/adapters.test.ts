@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
@@ -268,13 +269,22 @@ describe("CursorAdapter", () => {
     }
   });
 
+  // These fixtures use real `git` rather than a hand-made `.git` entry on
+  // purpose. Cursor resolves the repository with `git rev-parse --show-toplevel`,
+  // so a fabricated `.git` proves nothing about what Cursor would accept - it
+  // only asserts the equivalence that turned out to be wrong.
+  function git(cwd: string, ...args: string[]): void {
+    const result = spawnSync("git", args, { cwd, encoding: "utf8", windowsHide: true });
+    if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr ?? result.error}`);
+  }
+
   test("the repository slug comes from the repository root, slugified as Cursor does", () => {
     const parent = mkdtempSync(path.join(tmpdir(), "agent-headless-repo-"));
     try {
       const repository = path.join(parent, "My Repo!");
       const nested = path.join(repository, "packages", "api");
-      mkdirSync(path.join(repository, ".git"), { recursive: true });
       mkdirSync(nested, { recursive: true });
+      git(repository, "init", "-q");
 
       // Not `basename(cwd)`: Cursor slugs the repository root it resolves with
       // `git rev-parse --show-toplevel`, whatever subdirectory the run starts in.
@@ -292,12 +302,38 @@ describe("CursorAdapter", () => {
   test("a linked worktree's .git file still identifies the repository root", () => {
     const parent = mkdtempSync(path.join(tmpdir(), "agent-headless-linked-"));
     try {
-      const linked = path.join(parent, "checkout");
-      mkdirSync(linked, { recursive: true });
-      // Git writes a `.git` *file* in a linked worktree or submodule; a check
-      // that only accepts a directory would walk past the root and misreport.
-      writeFileSync(path.join(linked, ".git"), "gitdir: ../repo/.git/worktrees/checkout\n");
-      expect(cursorRepoSlug(linked)).toBe("checkout");
+      const repository = path.join(parent, "repo");
+      mkdirSync(repository, { recursive: true });
+      git(repository, "init", "-q");
+      git(repository, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init");
+      // Git writes a `.git` *file* in a linked worktree; a check that only
+      // accepts a directory would walk past the root and misreport.
+      git(repository, "worktree", "add", "-q", path.join(parent, "checkout"), "-b", "side");
+      expect(cursorRepoSlug(path.join(parent, "checkout"))).toBe("checkout");
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  test("a malformed .git entry is not mistaken for a repository", async () => {
+    const parent = mkdtempSync(path.join(tmpdir(), "agent-headless-malformed-"));
+    try {
+      const notARepository = path.join(parent, "not-a-repo");
+      const nested = path.join(notARepository, "src");
+      mkdirSync(nested, { recursive: true });
+      // `git rev-parse` calls this "invalid gitfile format" and refuses; an
+      // ancestor walk that accepts any entry named `.git` would derive
+      // `<worktrees-root>/not-a-repo/<name>`, where no worktree can ever exist.
+      writeFileSync(path.join(notARepository, ".git"), "");
+
+      expect(cursorRepoSlug(notARepository)).toBeUndefined();
+      expect(cursorRepoSlug(nested)).toBeUndefined();
+
+      const isolated = await adapter.prepare(
+        request("cursor", { model: "gpt-5", access: "edit-isolated", cwd: nested }),
+        { generateWorktreeName: () => "agent-headless-fixed-9" },
+      );
+      expect(cursorWorktreePath(isolated)).toBeUndefined();
     } finally {
       rmSync(parent, { recursive: true, force: true });
     }
