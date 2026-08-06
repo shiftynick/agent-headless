@@ -3,7 +3,14 @@ import { unsupported } from "../errors";
 import { asRecord, numberValue, parseJsonLines } from "../jsonl";
 import { probeExecutable } from "../process";
 import type { AgentUsage, Invocation, ParsedOutput, ProviderAdapter, ProviderCapabilities, RunRequest } from "../types";
-import { assertAccess, assertSession, envExecutable, textOutput } from "./shared";
+import {
+  assertAccess,
+  assertSession,
+  envExecutable,
+  findTerminalMarker,
+  providerFailureMessage,
+  textOutput,
+} from "./shared";
 
 export class ClaudeAdapter implements ProviderAdapter {
   readonly provider = "claude" as const;
@@ -79,25 +86,35 @@ export class ClaudeAdapter implements ProviderAdapter {
   parse(stdout: string, structured: boolean): ParsedOutput {
     if (!structured) return textOutput(this.provider, stdout);
     const trimmed = stdout.trim();
-    if (!trimmed) return { events: [], protocolError: "Claude returned no structured output" };
+    if (!trimmed) return { events: [], protocolError: "Claude returned no structured output", unreadable: true };
 
     if (!trimmed.includes("\n")) {
       try {
         const raw = JSON.parse(trimmed) as Record<string, unknown>;
         return this.parseRecords([{ provider: this.provider, type: String(raw.type ?? "result"), kind: raw.is_error === true ? "error" : "result", raw }]);
       } catch {
-        return { events: [], protocolError: "Claude returned invalid JSON" };
+        return { events: [], protocolError: "Claude returned invalid JSON", unreadable: true };
       }
     }
     const parsed = parseJsonLines(this.provider, stdout);
-    if (parsed.error) return { events: parsed.events, protocolError: parsed.error };
-    return this.parseRecords(parsed.events);
+    const warnings = parsed.warnings.length ? { warnings: parsed.warnings } : {};
+    if (parsed.error) return { events: parsed.events, protocolError: parsed.error, unreadable: true, ...warnings };
+    return { ...this.parseRecords(parsed.events), ...warnings };
   }
 
   private parseRecords(events: ParsedOutput["events"]): ParsedOutput {
-    const terminal = [...events].reverse().find((event) => asRecord(event.raw)?.type === "result");
-    const result = asRecord(terminal?.raw);
-    if (!result) return { events, protocolError: "Claude stream did not contain a terminal result" };
+    // Last terminal marker wins: a result followed by an `error` is a failure,
+    // an `error` followed by a later result is a success.
+    const terminal = findTerminalMarker(events, (event) => asRecord(event.raw)?.type === "result");
+    if (terminal?.outcome === "failure") {
+      // A failure Claude reported itself: the stream was readable, the run failed.
+      return { events, protocolError: providerFailureMessage("Claude", terminal.event) };
+    }
+    const result = asRecord(terminal?.event.raw);
+    if (!result) {
+      // Readable, but with no terminal marker at all: genuinely ambiguous.
+      return { events, protocolError: "Claude stream did not contain a terminal result", unreadable: true };
+    }
     if (result.is_error === true) return { events, protocolError: String(result.result ?? "Claude reported an error") };
     const usageRaw = asRecord(result.usage);
     const usage: AgentUsage = {};

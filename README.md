@@ -50,6 +50,11 @@ agent-headless run `
 Prompts can also be piped over stdin. `--json` prints the normalized result;
 without it the CLI prints only the final answer.
 
+The CLI exits `0` on success, `2` when the provider exited cleanly but its
+output could not be read (`status: "unparsed"` - the work may have completed,
+so check the reported workspace before retrying), and `1` for every other
+non-success outcome.
+
 ## Library
 
 ```ts
@@ -68,6 +73,59 @@ const result = await runAgent({
 assertSucceeded(result);
 console.log(result.finalText, result.usage);
 ```
+
+### Result status and workspace
+
+`result.status` is one of `succeeded`, `failed`, `unparsed`, `timed-out`, or
+`cancelled`. `unparsed` means the provider exited `0` but its output could not be
+interpreted - either nothing parsed at all, or a readable stream that carries no
+terminal marker. Unreadable output is not evidence of failure, and the run's
+changes may well exist. A failure the provider states outright - a Codex
+`turn.failed`, or a top-level `error` event from any provider - is `failed` even
+on a clean exit, and `result.warnings` carries the provider's own wording. When a
+stream holds more than one terminal marker, the last one decides: a success
+result followed by an `error` is `failed`, and an `error` followed by a later
+success result is `succeeded`.
+Individual unparseable JSONL lines never discard the rest of a stream; they are
+reported as bounded entries in `result.warnings`.
+
+Every run reports `result.workspace` - required on `AgentResult`, so no null
+check is needed - carrying the `cwd` the provider ran in, the effective `access`
+mode, and for isolated runs the `worktreeName`/`worktreeBase` the runner chose
+plus the observed `worktree` path when the provider disclosed one (read only
+from a session/init event, never from a tool or status event's `cwd`). That
+makes delegated work locatable even when the stream is unreadable.
+
+### Cursor's default model
+
+Cursor no longer requires an explicit model. When a request names none, the
+runner uses the exported constant `CURSOR_DEFAULT_MODEL`
+(`cursor-grok-4.5-medium`) - read the constant rather than hardcoding the string.
+An explicit `--model` / `request.model` always wins; `auto` is still refused,
+because a run must be attributable to a named model.
+
+A defaulted run is labelled: `result.modelDefaulted` is `true` and
+`result.modelRequested` carries the effective model, so both "which model ran"
+and "who chose it" are answerable. Callers that require an operator-chosen model
+- cold code review, where independence means the reviewing model's family was
+deliberately picked to differ from the implementer's - must reject a result with
+`modelDefaulted === true` instead of comparing strings against the constant.
+
+If Cursor rejects the model, the result's `warnings` say so and point at
+`agent-headless models cursor`; when the rejected model was the default, the
+live model list is fetched once and included, since the caller never chose it.
+No model listing happens on any other path.
+
+### Isolated worktrees are always named
+
+Cursor accepts a bare `--worktree` and then names the worktree itself without
+reporting the choice, which loses the work when the stream is unreadable. The
+runner therefore never sends a bare `--worktree`: if `edit-isolated` is requested
+without `providerOptions.cursor.worktreeName`, it generates
+`agent-headless-<time>-<random>`, passes it explicitly, and reports it as
+`result.workspace.worktreeName` on every outcome, failures and timeouts included.
+A caller-supplied name is used and reported unchanged. Tests can pin the
+generated name with the `generateWorktreeName` option of `runAgent`.
 
 ## Compatibility matrix
 

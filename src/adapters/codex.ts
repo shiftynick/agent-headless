@@ -3,7 +3,17 @@ import { unsupported } from "../errors";
 import { asRecord, numberValue, parseJsonLines } from "../jsonl";
 import { probeExecutable } from "../process";
 import type { AgentUsage, Invocation, ParsedOutput, ProviderAdapter, ProviderCapabilities, RunRequest } from "../types";
-import { assertAccess, assertSession, envExecutable, textOutput } from "./shared";
+import {
+  assertAccess,
+  assertSession,
+  envExecutable,
+  findTerminalMarker,
+  providerFailureMessage,
+  textOutput,
+} from "./shared";
+
+/** Codex's own terminal markers: exactly one of these ends a well-formed turn. */
+const CODEX_FAILURE_TYPES = ["turn.failed"] as const;
 
 export class CodexAdapter implements ProviderAdapter {
   readonly provider = "codex" as const;
@@ -77,14 +87,29 @@ export class CodexAdapter implements ProviderAdapter {
   parse(stdout: string, structured: boolean): ParsedOutput {
     if (!structured) return textOutput(this.provider, stdout);
     const parsed = parseJsonLines(this.provider, stdout);
-    if (parsed.error) return { events: parsed.events, protocolError: parsed.error };
+    const warnings = parsed.warnings.length ? { warnings: parsed.warnings } : {};
+    if (parsed.error) return { events: parsed.events, protocolError: parsed.error, unreadable: true, ...warnings };
     const started = parsed.events.find((event) => event.type === "thread.started");
-    const completed = [...parsed.events].reverse().find((event) => event.type === "turn.completed");
     const messages = parsed.events
       .map((event) => asRecord(event.raw))
       .map((raw) => asRecord(raw?.item))
       .filter((item) => item?.type === "agent_message" && typeof item.text === "string");
-    if (!completed) return { events: parsed.events, protocolError: "Codex stream did not contain turn.completed" };
+    // The last terminal marker wins, so a retry that completes is not overruled
+    // by an earlier failure and vice versa.
+    const terminal = findTerminalMarker(
+      parsed.events,
+      (event) => event.type === "turn.completed",
+      CODEX_FAILURE_TYPES,
+    );
+    if (terminal?.outcome === "failure") {
+      // A failure Codex reported itself: the stream was readable, the run failed.
+      return { events: parsed.events, protocolError: providerFailureMessage("Codex", terminal.event), ...warnings };
+    }
+    const completed = terminal?.event;
+    if (!completed) {
+      // Readable, but with no terminal marker at all: genuinely ambiguous.
+      return { events: parsed.events, protocolError: "Codex stream did not contain turn.completed", unreadable: true, ...warnings };
+    }
     const startRaw = asRecord(started?.raw);
     const completeRaw = asRecord(completed.raw);
     const rawUsage = asRecord(completeRaw?.usage);
@@ -103,6 +128,7 @@ export class CodexAdapter implements ProviderAdapter {
       ...(typeof lastMessage?.text === "string" ? { finalText: lastMessage.text } : {}),
       ...(typeof startRaw?.thread_id === "string" ? { sessionId: startRaw.thread_id } : {}),
       ...(Object.keys(usage).length ? { usage } : {}),
+      ...warnings,
     };
   }
 }

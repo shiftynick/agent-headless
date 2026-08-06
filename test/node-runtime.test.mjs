@@ -55,4 +55,77 @@ test("timed-out structured runs retain partial events for diagnosis", async () =
   assert.equal(result.status, "timed-out");
   assert.equal(result.events.length, 1);
   assert.equal(result.events[0].kind, "session");
+  assert.equal(result.workspace.cwd, process.cwd());
+});
+
+test("the packaged library tolerates a banner line and always reports its workspace", async () => {
+  const result = await runAgent(
+    {
+      provider: "cursor",
+      prompt: "do the work",
+      cwd: process.cwd(),
+      model: "gpt-5.3-codex-low",
+      access: "edit-isolated",
+      providerOptions: { cursor: { worktreeName: "task-018" } },
+    },
+    {
+      execute: async () => ({
+        stdout: [
+          "Cursor Agent 2026.08 starting",
+          JSON.stringify({ type: "system", subtype: "init", session_id: "c1", cwd: "/repo/.worktrees/task-018" }),
+          JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "done" }),
+        ].join("\n"),
+        stderr: "",
+        exitCode: 0,
+        durationMs: 3,
+        timedOut: false,
+        cancelled: false,
+      }),
+    },
+  );
+
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.finalText, "done");
+  assert.deepEqual(result.warnings, ["skipped unparseable JSONL at line 1"]);
+  assert.equal(result.workspace.worktree, "/repo/.worktrees/task-018");
+  assert.equal(result.workspace.worktreeName, "task-018");
+});
+
+// Guards the packaged distribution against the shape of failure a consumer
+// actually meets: the reviewer's live probe of dist/ got `finalText: "ok"` and
+// no error from a stream whose success result was followed by an `error` event.
+test("the packaged library reports a post-result error as a failed run", async () => {
+  const streams = {
+    claude: [
+      JSON.stringify({ type: "system", subtype: "init", session_id: "s1" }),
+      JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "ok", session_id: "s1" }),
+      JSON.stringify({ type: "error", message: "stream aborted after the result" }),
+    ],
+    cursor: [
+      JSON.stringify({ type: "system", subtype: "init", session_id: "c1" }),
+      JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "ok", session_id: "c1" }),
+      JSON.stringify({ type: "error", error: "stream aborted after the result" }),
+    ],
+  };
+  for (const [provider, lines] of Object.entries(streams)) {
+    const result = await runAgent(
+      { provider, prompt: "Say OK", cwd: process.cwd(), model: "model-test" },
+      {
+        execute: async () => ({
+          stdout: lines.join("\n"),
+          stderr: "",
+          exitCode: 0,
+          durationMs: 1,
+          timedOut: false,
+          cancelled: false,
+        }),
+      },
+    );
+    assert.equal(result.status, "failed", `${provider} must not report succeeded`);
+    assert.equal(result.finalText, undefined);
+    assert.ok(
+      result.warnings.some((warning) => warning.includes("stream aborted after the result")),
+      `${provider} must carry the provider's own wording, got ${JSON.stringify(result.warnings)}`,
+    );
+  }
 });

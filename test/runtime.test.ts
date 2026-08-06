@@ -2,8 +2,9 @@ import { expect, test } from "bun:test";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { getCapabilities, runAgent } from "../src";
+import { CURSOR_DEFAULT_MODEL, getCapabilities, runAgent } from "../src";
 import { runInvocation } from "../src/process";
+import type { RunAgentOptions, RunRequest } from "../src/types";
 
 const fakeClaude = path.join(import.meta.dir, "fixtures", "fake-claude.cmd");
 
@@ -60,6 +61,346 @@ test("capability probing launches a Windows cmd shim and reports resolved availa
     if (previous === undefined) delete process.env.CLAUDE_BIN;
     else process.env.CLAUDE_BIN = previous;
   }
+});
+
+function stubbed(
+  stdout: string,
+  overrides: Partial<{ exitCode: number | null; timedOut: boolean; cancelled: boolean; stderr: string }> = {},
+): RunAgentOptions {
+  return {
+    execute: async () => ({
+      stdout,
+      stderr: overrides.stderr ?? "",
+      exitCode: overrides.exitCode === undefined ? 0 : overrides.exitCode,
+      durationMs: 1,
+      timedOut: overrides.timedOut ?? false,
+      cancelled: overrides.cancelled ?? false,
+    }),
+  };
+}
+
+const isolatedCursor: RunRequest = {
+  provider: "cursor",
+  prompt: "do the work",
+  cwd: process.cwd(),
+  model: "gpt-5.3-codex-low",
+  access: "edit-isolated",
+  providerOptions: { cursor: { worktreeName: "task-018", worktreeBase: "main" } },
+};
+
+const cursorSuccess = [
+  JSON.stringify({ type: "system", subtype: "init", session_id: "c1", model: "gpt-5", cwd: "/repo/.worktrees/task-018" }),
+  JSON.stringify({ type: "assistant", subtype: "message", content: "working" }),
+  JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "done", session_id: "c1" }),
+].join("\n");
+
+test("a banner line before the stream does not fail an otherwise successful run", async () => {
+  const result = await runAgent(isolatedCursor, stubbed(`Cursor Agent 2026.08 starting\n${cursorSuccess}`));
+
+  expect(result.status).toBe("succeeded");
+  expect(result.finalText).toBe("done");
+  expect(result.events.map((event) => event.kind)).toEqual(["session", "message", "result"]);
+  expect(result.warnings).toEqual(["skipped unparseable JSONL at line 1"]);
+});
+
+test("a wholly unreadable stream from a clean exit reports unparsed, not failed", async () => {
+  const result = await runAgent(isolatedCursor, stubbed("banner one\nbanner two"));
+
+  expect(result.status).toBe("unparsed");
+  expect(result.exitCode).toBe(0);
+  expect(result.warnings.some((warning) => warning.includes("no parseable lines"))).toBe(true);
+});
+
+test("warnings stay bounded for a pathologically noisy stream", async () => {
+  const noise = Array.from({ length: 300 }, (_, index) => `noise ${index}`).join("\n");
+  const result = await runAgent(isolatedCursor, stubbed(`${noise}\n${cursorSuccess}`));
+
+  expect(result.status).toBe("succeeded");
+  expect(result.warnings.length).toBeLessThanOrEqual(7);
+  expect(result.warnings.at(-1)).toContain("skipped 300 unparseable JSONL lines in total");
+});
+
+test("a truncated trailing line does not discard the events before it", async () => {
+  const result = await runAgent(isolatedCursor, stubbed(`${cursorSuccess}\n{"type":"assist`));
+
+  expect(result.status).toBe("succeeded");
+  expect(result.finalText).toBe("done");
+  expect(result.warnings).toEqual(["skipped unparseable JSONL at line 4"]);
+});
+
+test("every outcome reports where the work went", async () => {
+  const succeeded = await runAgent(isolatedCursor, stubbed(cursorSuccess));
+  expect(succeeded.workspace).toMatchObject({
+    cwd: process.cwd(),
+    access: "edit-isolated",
+    worktree: "/repo/.worktrees/task-018",
+    worktreeName: "task-018",
+    worktreeBase: "main",
+  });
+
+  const failed = await runAgent(isolatedCursor, stubbed("", { exitCode: 3, stderr: "boom" }));
+  expect(failed.status).toBe("failed");
+  expect(failed.workspace).toMatchObject({ cwd: process.cwd(), access: "edit-isolated", worktreeName: "task-018" });
+
+  const timedOut = await runAgent(isolatedCursor, stubbed("", { exitCode: null, timedOut: true }));
+  expect(timedOut.status).toBe("timed-out");
+  expect(timedOut.workspace).toMatchObject({ worktreeName: "task-018", worktreeBase: "main" });
+
+  const cancelled = await runAgent(isolatedCursor, stubbed("", { exitCode: null, cancelled: true }));
+  expect(cancelled.status).toBe("cancelled");
+  expect(cancelled.workspace?.cwd).toBe(process.cwd());
+});
+
+test("an unreadable isolated stream still surfaces a worktree path printed in raw text", async () => {
+  const result = await runAgent(
+    isolatedCursor,
+    stubbed('preparing worktree {"worktree_path":"/repo/.worktrees/task-018"} ...\nstill not jsonl'),
+  );
+
+  expect(result.status).toBe("unparsed");
+  expect(result.workspace?.worktree).toBe("/repo/.worktrees/task-018");
+});
+
+test("an explicit provider failure on a clean exit is failed, not unparsed", async () => {
+  const result = await runAgent(
+    { provider: "codex", prompt: "x", cwd: process.cwd() },
+    stubbed([
+      JSON.stringify({ type: "thread.started", thread_id: "t1" }),
+      JSON.stringify({ type: "turn.failed", error: { message: "usage limit reached" } }),
+    ].join("\n")),
+  );
+
+  expect(result.status).toBe("failed");
+  expect(result.exitCode).toBe(0);
+  expect(result.warnings).toContain("Codex reported turn.failed: usage limit reached");
+});
+
+test("a clean exit with no terminal marker at all is still unparsed, not failed", async () => {
+  const result = await runAgent(
+    { provider: "codex", prompt: "x", cwd: process.cwd() },
+    stubbed([
+      JSON.stringify({ type: "thread.started", thread_id: "t1" }),
+      JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "OK" } }),
+    ].join("\n")),
+  );
+
+  expect(result.status).toBe("unparsed");
+  expect(result.exitCode).toBe(0);
+});
+
+test("a non-session event's differing cwd is not taken as the worktree", async () => {
+  const stream = [
+    JSON.stringify({ type: "system", subtype: "init", session_id: "c1", model: "gpt-5", cwd: process.cwd() }),
+    JSON.stringify({ type: "tool_call", subtype: "started", cwd: "/repo/packages/api" }),
+    JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "done", session_id: "c1" }),
+  ].join("\n");
+  const result = await runAgent(isolatedCursor, stubbed(stream));
+
+  expect(result.status).toBe("succeeded");
+  expect(result.workspace.worktree).toBeUndefined();
+  expect(result.workspace.worktreeName).toBe("task-018");
+});
+
+test("a genuinely failing provider is still reported as failed", async () => {
+  const result = await runAgent(
+    { provider: "codex", prompt: "x", cwd: process.cwd() },
+    stubbed("", { exitCode: 1, stderr: "codex exploded" }),
+  );
+
+  expect(result.status).toBe("failed");
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr).toBe("codex exploded");
+});
+
+/** Asserts a flag is present and immediately followed by its value. */
+function expectFlag(args: string[], flag: string, value: string): void {
+  expect(args[args.indexOf(flag) + 1]).toBe(value);
+}
+
+/** Captures the invocation runAgent actually spawned, alongside a canned result. */
+function capturing(
+  stdout: string,
+  overrides: Partial<{ exitCode: number | null; timedOut: boolean; stderr: string }> = {},
+): RunAgentOptions & { args: () => string[] } {
+  let args: string[] = [];
+  return {
+    args: () => args,
+    execute: async (invocation) => {
+      args = invocation.args;
+      return {
+        stdout,
+        stderr: overrides.stderr ?? "",
+        exitCode: overrides.exitCode === undefined ? 0 : overrides.exitCode,
+        durationMs: 1,
+        timedOut: overrides.timedOut ?? false,
+        cancelled: false,
+      };
+    },
+  };
+}
+
+const bareCursor: RunRequest = { provider: "cursor", prompt: "do the work", cwd: process.cwd() };
+
+test("a Cursor run with no model uses the documented default and says that it did", async () => {
+  const options = capturing(cursorSuccess);
+  const result = await runAgent(bareCursor, options);
+
+  expectFlag(options.args(), "--model", CURSOR_DEFAULT_MODEL);
+  expect(result.status).toBe("succeeded");
+  expect(result.modelDefaulted).toBe(true);
+  expect(result.modelRequested).toBe(CURSOR_DEFAULT_MODEL);
+});
+
+test("an explicit Cursor model overrides the default and is reported as chosen", async () => {
+  const options = capturing(cursorSuccess);
+  const result = await runAgent({ ...bareCursor, model: "gpt-5.3-codex-low" }, options);
+
+  expectFlag(options.args(), "--model", "gpt-5.3-codex-low");
+  expect(options.args()).not.toContain(CURSOR_DEFAULT_MODEL);
+  expect(result.modelRequested).toBe("gpt-5.3-codex-low");
+  expect(result.modelDefaulted).toBeFalsy();
+});
+
+test("Claude and Codex get no injected model default", async () => {
+  for (const provider of ["claude", "codex"] as const) {
+    const options = capturing(
+      provider === "claude"
+        ? JSON.stringify({ type: "result", is_error: false, result: "ok", session_id: "s1" })
+        : [
+            JSON.stringify({ type: "thread.started", thread_id: "t1" }),
+            JSON.stringify({ type: "turn.completed", usage: {} }),
+          ].join("\n"),
+    );
+    const result = await runAgent({ provider, prompt: "x", cwd: process.cwd() }, options);
+
+    expect(options.args()).not.toContain("--model");
+    expect(result.modelRequested).toBeUndefined();
+    expect(result.modelDefaulted).toBeFalsy();
+  }
+});
+
+test("a rejected default model is answered with the live model list", async () => {
+  const result = await runAgent(bareCursor, {
+    ...stubbed("", { exitCode: 1, stderr: "error: unknown model 'cursor-grok-4.5-medium'" }),
+    listModels: async () => ["gpt-5.3-codex-low", "cursor-grok-4.5-high-fast"],
+  });
+
+  expect(result.status).toBe("failed");
+  expect(result.modelDefaulted).toBe(true);
+  expect(result.warnings.some((warning) => warning.includes("run `agent-headless models cursor`"))).toBe(true);
+  expect(result.warnings.some((warning) => warning.includes("cursor-grok-4.5-high-fast"))).toBe(true);
+});
+
+test("the rejected-default model listing is resolved against the run's own environment", async () => {
+  let seen: { provider: string; executable?: string; env?: Record<string, string | undefined> } | undefined;
+  const env = { CURSOR_AGENT_BIN: "X:\\alt\\cursor-agent.exe", CURSOR_API_KEY: "other-account" };
+  const result = await runAgent(
+    { ...bareCursor, env },
+    {
+      ...stubbed("", { exitCode: 1, stderr: "error: unknown model 'cursor-grok-4.5-medium'" }),
+      listModels: async (provider, options) => {
+        seen = { provider, ...options };
+        return ["alt-install-model"];
+      },
+    },
+  );
+
+  expect(seen).toEqual({ provider: "cursor", executable: "X:\\alt\\cursor-agent.exe", env });
+  expect(result.warnings.some((warning) => warning.includes("alt-install-model"))).toBe(true);
+});
+
+test("a caller who explicitly names the default model is not reported as defaulted", async () => {
+  const options = capturing(cursorSuccess);
+  const result = await runAgent({ ...bareCursor, model: CURSOR_DEFAULT_MODEL }, options);
+
+  expectFlag(options.args(), "--model", CURSOR_DEFAULT_MODEL);
+  expect(result.status).toBe("succeeded");
+  expect(result.modelRequested).toBe(CURSOR_DEFAULT_MODEL);
+  // The flag reports who chose the model, not which string was chosen: an
+  // implementation comparing against CURSOR_DEFAULT_MODEL would fail here.
+  expect(result.modelDefaulted).toBeFalsy();
+});
+
+test("an explicitly chosen model that is rejected is not paid for with a model listing", async () => {
+  let listed = 0;
+  const result = await runAgent(
+    { ...bareCursor, model: "gpt-9-imaginary" },
+    {
+      ...stubbed("", { exitCode: 1, stderr: "error: model not found: gpt-9-imaginary" }),
+      listModels: async () => {
+        listed += 1;
+        return [];
+      },
+    },
+  );
+
+  expect(listed).toBe(0);
+  expect(result.warnings.some((warning) => warning.includes("agent-headless models cursor"))).toBe(true);
+});
+
+test("an ordinary failure triggers no model listing at all", async () => {
+  let listed = 0;
+  await runAgent(bareCursor, {
+    ...stubbed("", { exitCode: 1, stderr: "boom" }),
+    listModels: async () => {
+      listed += 1;
+      return [];
+    },
+  });
+
+  expect(listed).toBe(0);
+});
+
+test("an isolated Cursor run always names its worktree explicitly", async () => {
+  const options = capturing(cursorSuccess);
+  const result = await runAgent(
+    { ...bareCursor, model: "gpt-5", access: "edit-isolated" },
+    { ...options, generateWorktreeName: () => "agent-headless-fixed-1" },
+  );
+
+  const args = options.args();
+  expect(args.slice(args.indexOf("--worktree"), args.indexOf("--worktree") + 2))
+    .toEqual(["--worktree", "agent-headless-fixed-1"]);
+  expect(result.workspace?.worktreeName).toBe("agent-headless-fixed-1");
+});
+
+test("an explicit worktree name is used and reported unchanged", async () => {
+  const options = capturing(cursorSuccess);
+  const result = await runAgent(
+    { ...bareCursor, model: "gpt-5", access: "edit-isolated", providerOptions: { cursor: { worktreeName: "task-018" } } },
+    { ...options, generateWorktreeName: () => "agent-headless-fixed-1" },
+  );
+
+  expectFlag(options.args(), "--worktree", "task-018");
+  expect(options.args()).not.toContain("agent-headless-fixed-1");
+  expect(result.workspace?.worktreeName).toBe("task-018");
+});
+
+test("the generated worktree name survives a timeout and a non-zero exit", async () => {
+  const isolated: RunRequest = { ...bareCursor, model: "gpt-5", access: "edit-isolated" };
+  const generateWorktreeName = (): string => "agent-headless-fixed-2";
+
+  const timedOut = await runAgent(isolated, {
+    ...stubbed("", { exitCode: null, timedOut: true }),
+    generateWorktreeName,
+  });
+  expect(timedOut.status).toBe("timed-out");
+  expect(timedOut.workspace?.worktreeName).toBe("agent-headless-fixed-2");
+
+  const failed = await runAgent(isolated, { ...stubbed("", { exitCode: 4 }), generateWorktreeName });
+  expect(failed.status).toBe("failed");
+  expect(failed.workspace?.worktreeName).toBe("agent-headless-fixed-2");
+});
+
+test("concurrent isolated runs do not share a generated worktree name", async () => {
+  const isolated: RunRequest = { ...bareCursor, model: "gpt-5", access: "edit-isolated" };
+  const [first, second] = await Promise.all([
+    runAgent(isolated, stubbed(cursorSuccess)),
+    runAgent(isolated, stubbed(cursorSuccess)),
+  ]);
+
+  expect(first!.workspace?.worktreeName).toMatch(/^agent-headless-/u);
+  expect(first!.workspace?.worktreeName).not.toBe(second!.workspace?.worktreeName);
 });
 
 test("mid-run cancellation terminates a live provider process", async () => {

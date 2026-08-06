@@ -16,7 +16,9 @@ Run options:
   --prompt <text>                 Prompt text; omit to read stdin
   --prompt-file <path>            Read prompt from a UTF-8 file
   --cwd <path>                    Working directory (default: current directory)
-  --model <id>                    Provider model or alias (required for Cursor)
+  --model <id>                    Provider model or alias; when omitted, Cursor
+                                  falls back to cursor-grok-4.5-medium and the
+                                  result reports modelDefaulted: true
   --effort <level>                low, medium, high, xhigh, or max
   --access <mode>                 answer-only (default), inspect, edit-workspace, edit-isolated, inherit-session
   --session <mode>                ephemeral or persistent; use --resume for continuation
@@ -29,6 +31,12 @@ Run options:
   --trust-workspace               Explicitly trust Cursor's workspace
   --json                          Print the normalized result as JSON
   --help                          Show help
+
+Exit codes:
+  0  succeeded
+  1  failed, timed out, cancelled, or a usage error
+  2  unparsed - the provider exited 0 but its output could not be read; the
+     work may have completed, so check the reported workspace before retrying
 `;
 
 function take(args: string[], index: number, flag: string): string {
@@ -140,7 +148,16 @@ async function main(): Promise<void> {
   if (json) console.log(JSON.stringify(result, null, 2));
   else if (result.finalText !== undefined) process.stdout.write(`${result.finalText}\n`);
   if (result.stderr && result.status !== "succeeded") process.stderr.write(result.stderr);
-  if (result.status !== "succeeded") process.exitCode = 1;
+  if (result.status === "unparsed") {
+    // The provider exited 0 but its output was unreadable: the work may exist.
+    for (const warning of result.warnings) process.stderr.write(`warning: ${warning}\n`);
+    const workspace = result.workspace;
+    if (workspace) {
+      const worktree = workspace.worktree ?? workspace.worktreeName;
+      process.stderr.write(`workspace: ${workspace.cwd}${worktree ? ` (worktree: ${worktree})` : ""}\n`);
+    }
+    process.exitCode = 2;
+  } else if (result.status !== "succeeded") process.exitCode = 1;
 }
 
 main().catch((error) => {

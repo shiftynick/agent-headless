@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.3.0
+
+- JSONL parsing is tolerant: an unparseable line is skipped and reported as a
+  bounded warning instead of discarding the rest of the stream. A stream-level
+  error is raised only when nothing at all parsed.
+- New `unparsed` run status separates "the provider exited 0 but we could not
+  read its output" from "the provider failed". The CLI exits `2` for it. A
+  failure the provider states explicitly - a Codex `turn.failed`, or a top-level
+  `error` event from any provider - is reported as `failed` even on a clean exit
+  and carries the provider's own wording. `unparsed` covers both output that
+  could not be read at all and a readable stream with no terminal marker.
+- Where a stream holds more than one terminal marker, the last one decides, for
+  every provider: a success result followed by an `error` is `failed`, and an
+  `error` followed by a later success result is `succeeded`.
+- Every run reports `result.workspace` (cwd, access, and isolated worktree
+  name/base plus the observed worktree path when discoverable), so delegated
+  work is locatable on success, failure, timeout, and cancellation alike. The
+  field is required on `AgentResult`, so consumers need no null check. Only a
+  session/init event's differing `cwd` is read as the worktree; a tool or status
+  event's `cwd` is not.
+- `listModels(provider, options)` accepts the executable and env to list from,
+  and the listing offered after a rejected default model is resolved against the
+  failed run's own `request.env` rather than process-global config.
+- Cursor no longer requires an explicit model. A request that names none uses the
+  exported `CURSOR_DEFAULT_MODEL` (`cursor-grok-4.5-medium`); an explicit model
+  always wins and `auto` is still refused.
+- New `result.modelDefaulted` reports whether the runner picked the model. It is
+  `true` only when the caller named none, and `modelRequested` now always carries
+  the effective model. Callers that require an operator-chosen model - cold
+  review, where the reviewing model's family must be deliberately different from
+  the implementer's - must reject `modelDefaulted === true`.
+- A Cursor failure that looks like a rejected model now says so and points at
+  `agent-headless models cursor`; when the rejected model was the default, the
+  live list is fetched once and included. No other path lists models.
+- Isolated Cursor runs are never launched with a bare `--worktree`. When no
+  `worktreeName` is supplied the runner generates one
+  (`agent-headless-<time>-<random>`), passes it explicitly, and reports the
+  effective name in `result.workspace.worktreeName` on every outcome - so the
+  worktree stays locatable even when the stream is unreadable. Tests can pin the
+  name with the new `generateWorktreeName` run option.
+
 ## 0.2.0
 
 - The published and checked-in distribution now runs on Node 20; Bun remains a

@@ -1,6 +1,6 @@
 {
   "name": "agent-headless",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "One typed headless interface for Claude Code, Codex, and Cursor Agent CLIs.",
   "type": "module",
   "bin": {
@@ -12,7 +12,11 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist", "README.md", "LICENSE"],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "bun build ./src/index.ts ./src/cli.ts --outdir ./dist --target node --format esm && bunx tsc -p tsconfig.build.json --emitDeclarationOnly",
     "check": "bunx tsc --noEmit && bun run test && bun run build && node --test test/node-runtime.test.mjs",

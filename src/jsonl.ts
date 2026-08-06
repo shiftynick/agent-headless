@@ -13,18 +13,44 @@ function eventKind(provider: Provider, type: string, raw: Record<string, unknown
   return "unknown";
 }
 
-export function parseJsonLines(provider: Provider, stdout: string): { events: AgentEvent[]; error?: string } {
+/** Upper bound on per-line warnings retained; the remainder is summarized as a count. */
+export const MAX_JSONL_WARNINGS = 5;
+
+export interface JsonLinesResult {
+  events: AgentEvent[];
+  /** Bounded, human-readable notes about lines that were skipped. */
+  warnings: string[];
+  /** Set only when the stream was wholly unreadable: at least one line, none parseable. */
+  error?: string;
+}
+
+/**
+ * Parses a JSONL stream leniently: unparseable lines are skipped and reported as
+ * bounded warnings instead of aborting the stream. A stream-level `error` is
+ * returned only when nothing at all parsed, so a leading banner line or a
+ * truncated trailing line can never discard a provider's real events.
+ */
+export function parseJsonLines(provider: Provider, stdout: string): JsonLinesResult {
   const events: AgentEvent[] = [];
+  const warnings: string[] = [];
+  let skipped = 0;
   const lines = stdout.split(/\r?\n/u).filter((line) => line.trim());
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index]!;
     try {
       events.push(parseJsonEvent(provider, line));
     } catch {
-      return { events, error: `invalid JSONL at line ${index + 1}` };
+      skipped += 1;
+      if (warnings.length < MAX_JSONL_WARNINGS) warnings.push(`skipped unparseable JSONL at line ${index + 1}`);
     }
   }
-  return { events };
+  if (skipped > warnings.length) {
+    warnings.push(`skipped ${skipped} unparseable JSONL lines in total (${warnings.length} listed)`);
+  }
+  if (!events.length && skipped > 0) {
+    return { events, warnings, error: `invalid JSONL: no parseable lines in ${skipped} line(s) of provider output` };
+  }
+  return { events, warnings };
 }
 
 export function parseJsonEvent(provider: Provider, line: string): AgentEvent {
