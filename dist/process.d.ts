@@ -21,6 +21,18 @@ export interface ExecutableProbe {
  * exactly how an equivalent overlay ends up resolving differently here than
  * it does for the provider.
  */
+/**
+ * The one matching rule for reading a variable out of an overlay or an
+ * environment object: case-insensitive on win32, exact elsewhere, and the
+ * LAST matching entry wins - mirroring effectiveEnv, where a later
+ * case-variant entry overwrites an earlier one. Every reader must go through
+ * this; two implementations of this loop is how the semantics drifted apart
+ * twice before.
+ */
+export declare function lastEnvMatch(env: Record<string, string | undefined>, name: string): {
+    matched: boolean;
+    value: string | undefined;
+};
 export declare function envValue(env: NodeJS.ProcessEnv, name: string): string | undefined;
 export declare function resolveOnWindows(command: string, env: NodeJS.ProcessEnv): string;
 /**

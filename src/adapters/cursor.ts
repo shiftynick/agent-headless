@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { unsupported } from "../errors";
 import { asRecord, numberValue, parseJsonLines } from "../jsonl";
-import { effectiveEnv, probeExecutable, resolveCommand, runInvocation } from "../process";
+import { effectiveEnv, probeExecutable, resolveCommand, runInvocation, lastEnvMatch } from "../process";
 import type {
   AgentUsage,
   Invocation,
@@ -108,15 +108,10 @@ export const CURSOR_WORKTREE_NAME_PATTERN = /^[A-Za-z0-9._-]+$/u;
  * reason it is there: Windows environment variables are.
  */
 function childEnvValue(name: string, env?: Record<string, string | undefined>): string | undefined {
-  // Last match wins, mirroring effectiveEnv. A deleted-last duplicate
-  // ({X: "value", x: undefined}) therefore reads as deleted, exactly as the
-  // child would see it.
-  let matched = false;
-  let value: string | undefined;
-  for (const key of Object.keys(env ?? {})) {
-    const matches = process.platform === "win32" ? key.toLowerCase() === name.toLowerCase() : key === name;
-    if (matches) { matched = true; value = env![key]; }
-  }
+  // One matcher, shared with envValue: lastEnvMatch. What stays distinct here
+  // is only the fallthrough - a present-but-undefined entry means the child
+  // sees the variable DELETED, so it must not fall through to process.env.
+  const { matched, value } = lastEnvMatch(env ?? {}, name);
   return matched ? value : process.env[name];
 }
 

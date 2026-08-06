@@ -28,17 +28,34 @@ export interface ExecutableProbe {
  * exactly how an equivalent overlay ends up resolving differently here than
  * it does for the provider.
  */
-export function envValue(env: NodeJS.ProcessEnv, name: string): string | undefined {
-  if (process.platform !== "win32") return env[name];
-  // Last match wins, mirroring effectiveEnv, where a later case-variant entry
-  // overwrites an earlier one. A first-match read here would resolve
-  // {CLAUDE_BIN: "A", claude_bin: "B"} to A while the child sees B.
-  const lower = name.toLowerCase();
+/**
+ * The one matching rule for reading a variable out of an overlay or an
+ * environment object: case-insensitive on win32, exact elsewhere, and the
+ * LAST matching entry wins - mirroring effectiveEnv, where a later
+ * case-variant entry overwrites an earlier one. Every reader must go through
+ * this; two implementations of this loop is how the semantics drifted apart
+ * twice before.
+ */
+export function lastEnvMatch(
+  env: Record<string, string | undefined>,
+  name: string,
+): { matched: boolean; value: string | undefined } {
+  const fold = process.platform === "win32";
+  const target = fold ? name.toLowerCase() : name;
+  let matched = false;
   let value: string | undefined;
   for (const key of Object.keys(env)) {
-    if (key.toLowerCase() === lower) value = env[key];
+    if ((fold ? key.toLowerCase() : key) === target) {
+      matched = true;
+      value = env[key];
+    }
   }
-  return value;
+  return { matched, value };
+}
+
+export function envValue(env: NodeJS.ProcessEnv, name: string): string | undefined {
+  if (process.platform !== "win32") return env[name];
+  return lastEnvMatch(env, name).value;
 }
 
 export function resolveOnWindows(command: string, env: NodeJS.ProcessEnv): string {
