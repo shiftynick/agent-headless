@@ -33,6 +33,64 @@ export function resolveOnWindows(command: string, env: NodeJS.ProcessEnv): strin
   return command;
 }
 
+/**
+ * The environment a child launched with these overrides actually receives:
+ * `process.env` with `options.env` overlaid, where an explicit `undefined`
+ * *removes* the variable and, on Windows, a differently-cased override replaces
+ * the inherited entry rather than sitting beside it.
+ *
+ * Extracted so that anything which has to see the world as the provider will -
+ * `gitToplevel`'s repository probe, most of all - builds the same environment
+ * `runInvocation` builds, instead of re-deriving it and drifting.
+ */
+export function effectiveEnv(overrides?: Record<string, string | undefined>): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const [key, value] of Object.entries(overrides ?? {})) {
+    const existing = process.platform === "win32"
+      ? Object.keys(env).find((candidate) => candidate.toLowerCase() === key.toLowerCase())
+      : key;
+    if (existing && existing !== key) delete env[existing];
+    if (value === undefined) delete env[key];
+    else env[key] = value;
+  }
+  return env;
+}
+
+/**
+ * How a command name plus arguments must actually be handed to `spawn` under a
+ * given environment.
+ *
+ * Two Windows facts force this, both verified on Node 22 (win32):
+ *
+ * 1. `spawn`/`spawnSync` resolve a bare command against the *child* environment's
+ *    `PATH` - a `.exe` reachable only through an overridden `PATH` is found, and
+ *    one reachable only through the parent's is not. Lookup is therefore already
+ *    at parity with the child, but `resolveOnWindows` is still applied so the
+ *    resolved path is visible and `PATHEXT` is honoured consistently.
+ * 2. A `.cmd`/`.bat` target cannot be executed directly at all: spawning one by
+ *    full path fails `EINVAL`, and a bare name whose only match is a `.cmd` fails
+ *    `ENOENT`. It has to be run through `cmd.exe`.
+ *
+ * Sharing this with `runInvocation` is what makes "the probe sees git exactly as
+ * the provider invocation would" true rather than aspirational.
+ */
+export function resolveCommand(
+  command: string,
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+): { command: string; args: string[]; windowsVerbatimArguments: boolean } {
+  const resolved = resolveOnWindows(command, env);
+  if (process.platform === "win32" && /\.(?:cmd|bat)$/iu.test(resolved)) {
+    const commandLine = `"${[resolved, ...args].map(quoteCmd).join(" ")}"`;
+    return {
+      command: env.ComSpec || env.COMSPEC || "cmd.exe",
+      args: ["/d", "/s", "/c", commandLine],
+      windowsVerbatimArguments: true,
+    };
+  }
+  return { command: resolved, args: [...args], windowsVerbatimArguments: false };
+}
+
 function quoteCmd(value: string): string {
   if (/[\r\n%!]/u.test(value)) {
     throw new AgentHeadlessError(
@@ -56,24 +114,8 @@ export async function runInvocation(
   if (options.signal?.aborted) {
     return { stdout: "", stderr: "", exitCode: null, durationMs: 0, timedOut: false, cancelled: true };
   }
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  for (const [key, value] of Object.entries(options.env ?? {})) {
-    const existing = process.platform === "win32"
-      ? Object.keys(env).find((candidate) => candidate.toLowerCase() === key.toLowerCase())
-      : key;
-    if (existing && existing !== key) delete env[existing];
-    if (value === undefined) delete env[key];
-    else env[key] = value;
-  }
-  let command = resolveOnWindows(invocation.command, env);
-  let args = invocation.args;
-  let windowsVerbatimArguments = false;
-  if (process.platform === "win32" && /\.(?:cmd|bat)$/iu.test(command)) {
-    const commandLine = `"${[command, ...args].map(quoteCmd).join(" ")}"`;
-    command = env.ComSpec || env.COMSPEC || "cmd.exe";
-    args = ["/d", "/s", "/c", commandLine];
-    windowsVerbatimArguments = true;
-  }
+  const env = effectiveEnv(options.env);
+  const { command, args, windowsVerbatimArguments } = resolveCommand(invocation.command, invocation.args, env);
 
   return await new Promise<ProcessResult>((resolve, reject) => {
     let stdout = "";

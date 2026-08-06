@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { unsupported } from "../errors";
 import { asRecord, numberValue, parseJsonLines } from "../jsonl";
-import { probeExecutable, runInvocation } from "../process";
+import { effectiveEnv, probeExecutable, resolveCommand, runInvocation } from "../process";
 import type {
   AgentUsage,
   Invocation,
@@ -165,13 +165,25 @@ function hasGitAncestor(start: string): boolean {
  * an empty or malformed `.git`, a cwd that does not exist - because each of
  * those is a case where Cursor itself refuses to create a worktree, and a path
  * derived from them could never exist.
+ *
+ * Run under the *request's* environment, not the parent's. The whole worth of an
+ * absent `workspace.worktree` is that it proves no worktree exists; that holds
+ * only if the probe and the provider see git identically. A caller who hands
+ * Cursor a `PATH` on which git is reachable, while the parent's is not, would
+ * otherwise get a real worktree plus a result claiming there is none. Both the
+ * environment and the command resolution come from the same helpers
+ * `runInvocation` uses, so the two cannot drift.
  */
-function gitToplevel(cwd: string): string | undefined {
+function gitToplevel(cwd: string, env?: Record<string, string | undefined>): string | undefined {
   try {
-    const result = spawnSync("git", ["rev-parse", "--show-toplevel"], {
+    const childEnv = effectiveEnv(env);
+    const resolved = resolveCommand("git", ["rev-parse", "--show-toplevel"], childEnv);
+    const result = spawnSync(resolved.command, resolved.args, {
       cwd,
+      env: childEnv,
       encoding: "utf8",
       windowsHide: true,
+      windowsVerbatimArguments: resolved.windowsVerbatimArguments,
       timeout: 10_000,
     });
     if (result.error || result.status !== 0) return undefined;
@@ -184,11 +196,40 @@ function gitToplevel(cwd: string): string | undefined {
 }
 
 /**
- * Memo of resolved-cwd to slug. `describeWorkspace` runs once for the partial
- * result and again for the final one, so an un-memoized lookup would spend two
- * subprocesses per run for one unchanging answer.
+ * Encodes an environment overlay as a cache-key fragment.
+ *
+ * `JSON.stringify` on the env object cannot be used: it drops properties whose
+ * value is `undefined`, so `{ CURSOR_API_KEY: undefined }` and `{}` would
+ * collapse to one key even though `runInvocation` treats them oppositely (the
+ * first deletes an inherited credential, the second keeps it). Encoding each
+ * property as a tuple - `[name]` when present-but-undefined, `[name, value]`
+ * otherwise - keeps those two apart, and sorting by name makes the key
+ * independent of property insertion order. `null` marks "no overlay at all",
+ * which is again distinct from an empty one.
+ */
+function envKeyPart(env?: Record<string, string | undefined>): (string[])[] | null {
+  return env
+    ? Object.keys(env).sort().map((name) => (env[name] === undefined ? [name] : [name, env[name]!]))
+    : null;
+}
+
+/**
+ * Memo of resolved-cwd plus probe environment to slug. `describeWorkspace` runs
+ * once for the partial result and again for the final one, so an un-memoized
+ * lookup would spend two subprocesses per run for one unchanging answer.
+ *
+ * The environment is part of the key because it is part of the question: the
+ * probe runs `git` as the request's environment defines it, so two requests that
+ * differ only in `PATH` can legitimately resolve one cwd to different roots (or
+ * to a root and to nothing). Keying on cwd alone would let the first answer
+ * stand in for the second and reintroduce exactly the parity break the env
+ * threading fixes.
  */
 const repoSlugCache = new Map<string, string | undefined>();
+
+function repoSlugKey(cwd: string, env?: Record<string, string | undefined>): string {
+  return JSON.stringify([cwd, envKeyPart(env)]);
+}
 
 /**
  * The per-repository directory Cursor nests worktrees in: the slugified base
@@ -198,17 +239,22 @@ const repoSlugCache = new Map<string, string | undefined>();
  * repository would derive a path no worktree can ever occupy, which is exactly
  * the fabrication this runner promises never to commit.
  *
- * Memoized per resolved `cwd` for the process lifetime, so a directory that
- * becomes (or stops being) a repository mid-process keeps its first answer -
- * the same lifetime contract the model listing memo carries.
+ * `env` is the run's environment overlay (`request.env`), applied to the probe
+ * exactly as it will be applied to Cursor itself; omitting it probes under the
+ * inherited environment.
+ *
+ * Memoized per resolved `cwd` *and* probe environment for the process lifetime,
+ * so a directory that becomes (or stops being) a repository mid-process keeps
+ * its first answer - the same lifetime contract the model listing memo carries.
  */
-export function cursorRepoSlug(cwd: string): string | undefined {
+export function cursorRepoSlug(cwd: string, env?: Record<string, string | undefined>): string | undefined {
   const start = path.resolve(cwd);
-  const cached = repoSlugCache.get(start);
-  if (cached !== undefined || repoSlugCache.has(start)) return cached;
-  const toplevel = hasGitAncestor(start) ? gitToplevel(start) : undefined;
+  const key = repoSlugKey(start, env);
+  const cached = repoSlugCache.get(key);
+  if (cached !== undefined || repoSlugCache.has(key)) return cached;
+  const toplevel = hasGitAncestor(start) ? gitToplevel(start, env) : undefined;
   const slug = toplevel === undefined ? undefined : slugifyRepoName(path.basename(toplevel));
-  repoSlugCache.set(start, slug);
+  repoSlugCache.set(key, slug);
   return slug;
 }
 
@@ -222,14 +268,19 @@ export function cursorRepoSlug(cwd: string): string | undefined {
  *
  * `undefined` (never a guess) when any input is missing: a non-isolated or
  * non-Cursor request, a name Cursor would reject, no determinable root, or a
- * cwd `git rev-parse --show-toplevel` does not resolve to a repository root.
+ * cwd `git rev-parse --show-toplevel` - run under `env`, the same environment
+ * overlay the Cursor invocation gets - does not resolve to a repository root.
  */
-export function cursorWorktreePath(request: RunRequest, cwd: string = request.cwd): string | undefined {
+export function cursorWorktreePath(
+  request: RunRequest,
+  cwd: string = request.cwd,
+  env: Record<string, string | undefined> | undefined = request.env,
+): string | undefined {
   if (request.provider !== "cursor" || request.access !== "edit-isolated") return undefined;
   const name = request.providerOptions?.cursor?.worktreeName;
   if (!name || !CURSOR_WORKTREE_NAME_PATTERN.test(name)) return undefined;
-  const root = cursorWorktreesRoot(request.env);
-  const slug = cursorRepoSlug(cwd);
+  const root = cursorWorktreesRoot(env);
+  const slug = cursorRepoSlug(cwd, env);
   if (root === undefined || slug === undefined) return undefined;
   // Resolved against cwd because Cursor resolves a relative root against its own
   // working directory, which is this cwd; an absolute root is unaffected.
@@ -240,15 +291,8 @@ const modelPromises = new Map<string, Promise<string[]>>();
 
 /**
  * Cache key for a model listing, covering the whole environment it was made
- * under - two installations, or two accounts, can offer different models.
- *
- * `JSON.stringify` on the env object cannot be used: it drops properties whose
- * value is `undefined`, so `{ CURSOR_API_KEY: undefined }` and `{}` would
- * collapse to one key even though `runInvocation` treats them oppositely (the
- * first deletes an inherited credential, the second keeps it). Encoding each
- * property as a tuple - `[name]` when present-but-undefined, `[name, value]`
- * otherwise - keeps those two apart, and sorting by name makes the key
- * independent of property insertion order.
+ * under - two installations, or two accounts, can offer different models. The
+ * environment is encoded by `envKeyPart`, which the repository-slug memo shares.
  *
  * Scope note: this deliberately keys only the *overrides*. A run whose
  * credentials come from inherited `process.env` shares a key with any other
@@ -258,10 +302,7 @@ const modelPromises = new Map<string, Promise<string[]>>();
  * two listings in practice.
  */
 export function modelListingKey(executable: string, env?: Record<string, string | undefined>): string {
-  const entries = env
-    ? Object.keys(env).sort().map((name) => (env[name] === undefined ? [name] : [name, env[name]]))
-    : null;
-  return JSON.stringify([executable, entries]);
+  return JSON.stringify([executable, envKeyPart(env)]);
 }
 
 function parseModels(stdout: string): string[] {

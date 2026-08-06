@@ -151,9 +151,9 @@ the worktree branches from, **not** a directory. Cursor has no flag for the
 location; export `CURSOR_WORKTREES_ROOT` (honoured through `request.env`) to
 move it. `workspace.worktree` is omitted rather than guessed when no worktree can
 exist - a `worktreeName` outside Cursor's `[A-Za-z0-9._-]+`, a `cwd` that
-`git rev-parse --show-toplevel` does not resolve to a repository root (so an
-empty or malformed `.git` entry derives nothing), or no resolvable home
-directory - and, for Claude's `--worktree`,
+`git rev-parse --show-toplevel`, run under this request's `env`, does not resolve
+to a repository root (so an empty or malformed `.git` entry derives nothing), or
+no resolvable home directory - and, for Claude's `--worktree`,
 whenever its output discloses no path, since Claude documents no fixed layout.
 
 `cursorWorktreePath`, `cursorWorktreesRoot` and `cursorRepoSlug` are exported for

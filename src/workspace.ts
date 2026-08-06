@@ -113,7 +113,10 @@ export function describeWorkspace(
   // A disclosed path only beats the derived one once it is absolute; an
   // unusable disclosure falls through to deriving rather than being reported.
   const reported = absoluteReported(disclosed, cwd);
-  const derived = isolated && !reported ? cursorWorktreePath(request, cwd) : undefined;
+  // `request.env` is passed explicitly: the derivation's git probe must run under
+  // the same environment the provider ran under, or an absent path stops proving
+  // anything about whether a worktree exists.
+  const derived = isolated && !reported ? cursorWorktreePath(request, cwd, request.env) : undefined;
   const worktree = reported ?? derived;
   return {
     cwd,

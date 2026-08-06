@@ -56,11 +56,15 @@ export declare function cursorWorktreesRoot(env?: Record<string, string | undefi
  * repository would derive a path no worktree can ever occupy, which is exactly
  * the fabrication this runner promises never to commit.
  *
- * Memoized per resolved `cwd` for the process lifetime, so a directory that
- * becomes (or stops being) a repository mid-process keeps its first answer -
- * the same lifetime contract the model listing memo carries.
+ * `env` is the run's environment overlay (`request.env`), applied to the probe
+ * exactly as it will be applied to Cursor itself; omitting it probes under the
+ * inherited environment.
+ *
+ * Memoized per resolved `cwd` *and* probe environment for the process lifetime,
+ * so a directory that becomes (or stops being) a repository mid-process keeps
+ * its first answer - the same lifetime contract the model listing memo carries.
  */
-export declare function cursorRepoSlug(cwd: string): string | undefined;
+export declare function cursorRepoSlug(cwd: string, env?: Record<string, string | undefined>): string | undefined;
 /**
  * Where an isolated Cursor run's worktree is, computed *before* the provider
  * emits anything. Cursor places a named worktree at
@@ -71,20 +75,14 @@ export declare function cursorRepoSlug(cwd: string): string | undefined;
  *
  * `undefined` (never a guess) when any input is missing: a non-isolated or
  * non-Cursor request, a name Cursor would reject, no determinable root, or a
- * cwd `git rev-parse --show-toplevel` does not resolve to a repository root.
+ * cwd `git rev-parse --show-toplevel` - run under `env`, the same environment
+ * overlay the Cursor invocation gets - does not resolve to a repository root.
  */
-export declare function cursorWorktreePath(request: RunRequest, cwd?: string): string | undefined;
+export declare function cursorWorktreePath(request: RunRequest, cwd?: string, env?: Record<string, string | undefined> | undefined): string | undefined;
 /**
  * Cache key for a model listing, covering the whole environment it was made
- * under - two installations, or two accounts, can offer different models.
- *
- * `JSON.stringify` on the env object cannot be used: it drops properties whose
- * value is `undefined`, so `{ CURSOR_API_KEY: undefined }` and `{}` would
- * collapse to one key even though `runInvocation` treats them oppositely (the
- * first deletes an inherited credential, the second keeps it). Encoding each
- * property as a tuple - `[name]` when present-but-undefined, `[name, value]`
- * otherwise - keeps those two apart, and sorting by name makes the key
- * independent of property insertion order.
+ * under - two installations, or two accounts, can offer different models. The
+ * environment is encoded by `envKeyPart`, which the repository-slug memo shares.
  *
  * Scope note: this deliberately keys only the *overrides*. A run whose
  * credentials come from inherited `process.env` shares a key with any other

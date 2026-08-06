@@ -95,6 +95,31 @@ function resolveOnWindows(command, env) {
   }
   return command;
 }
+function effectiveEnv(overrides) {
+  const env = { ...process.env };
+  for (const [key, value] of Object.entries(overrides ?? {})) {
+    const existing = process.platform === "win32" ? Object.keys(env).find((candidate) => candidate.toLowerCase() === key.toLowerCase()) : key;
+    if (existing && existing !== key)
+      delete env[existing];
+    if (value === undefined)
+      delete env[key];
+    else
+      env[key] = value;
+  }
+  return env;
+}
+function resolveCommand(command, args, env) {
+  const resolved = resolveOnWindows(command, env);
+  if (process.platform === "win32" && /\.(?:cmd|bat)$/iu.test(resolved)) {
+    const commandLine = `"${[resolved, ...args].map(quoteCmd).join(" ")}"`;
+    return {
+      command: env.ComSpec || env.COMSPEC || "cmd.exe",
+      args: ["/d", "/s", "/c", commandLine],
+      windowsVerbatimArguments: true
+    };
+  }
+  return { command: resolved, args: [...args], windowsVerbatimArguments: false };
+}
 function quoteCmd(value) {
   if (/[\r\n%!]/u.test(value)) {
     throw new AgentHeadlessError("invalid_request", "A Windows .cmd argument contains newline, % or !; configure the provider executable directly.");
@@ -106,25 +131,8 @@ async function runInvocation(invocation, options) {
   if (options.signal?.aborted) {
     return { stdout: "", stderr: "", exitCode: null, durationMs: 0, timedOut: false, cancelled: true };
   }
-  const env = { ...process.env };
-  for (const [key, value] of Object.entries(options.env ?? {})) {
-    const existing = process.platform === "win32" ? Object.keys(env).find((candidate) => candidate.toLowerCase() === key.toLowerCase()) : key;
-    if (existing && existing !== key)
-      delete env[existing];
-    if (value === undefined)
-      delete env[key];
-    else
-      env[key] = value;
-  }
-  let command = resolveOnWindows(invocation.command, env);
-  let args = invocation.args;
-  let windowsVerbatimArguments = false;
-  if (process.platform === "win32" && /\.(?:cmd|bat)$/iu.test(command)) {
-    const commandLine = `"${[command, ...args].map(quoteCmd).join(" ")}"`;
-    command = env.ComSpec || env.COMSPEC || "cmd.exe";
-    args = ["/d", "/s", "/c", commandLine];
-    windowsVerbatimArguments = true;
-  }
+  const env = effectiveEnv(options.env);
+  const { command, args, windowsVerbatimArguments } = resolveCommand(invocation.command, invocation.args, env);
   return await new Promise((resolve, reject) => {
     let stdout = "";
     let stderr = "";
@@ -625,12 +633,16 @@ function hasGitAncestor(start) {
     current = parent;
   }
 }
-function gitToplevel(cwd) {
+function gitToplevel(cwd, env) {
   try {
-    const result = spawnSync("git", ["rev-parse", "--show-toplevel"], {
+    const childEnv = effectiveEnv(env);
+    const resolved = resolveCommand("git", ["rev-parse", "--show-toplevel"], childEnv);
+    const result = spawnSync(resolved.command, resolved.args, {
       cwd,
+      env: childEnv,
       encoding: "utf8",
       windowsHide: true,
+      windowsVerbatimArguments: resolved.windowsVerbatimArguments,
       timeout: 1e4
     });
     if (result.error || result.status !== 0)
@@ -641,33 +653,39 @@ function gitToplevel(cwd) {
     return;
   }
 }
+function envKeyPart(env) {
+  return env ? Object.keys(env).sort().map((name) => env[name] === undefined ? [name] : [name, env[name]]) : null;
+}
 var repoSlugCache = new Map;
-function cursorRepoSlug(cwd) {
+function repoSlugKey(cwd, env) {
+  return JSON.stringify([cwd, envKeyPart(env)]);
+}
+function cursorRepoSlug(cwd, env) {
   const start = path3.resolve(cwd);
-  const cached = repoSlugCache.get(start);
-  if (cached !== undefined || repoSlugCache.has(start))
+  const key = repoSlugKey(start, env);
+  const cached = repoSlugCache.get(key);
+  if (cached !== undefined || repoSlugCache.has(key))
     return cached;
-  const toplevel = hasGitAncestor(start) ? gitToplevel(start) : undefined;
+  const toplevel = hasGitAncestor(start) ? gitToplevel(start, env) : undefined;
   const slug = toplevel === undefined ? undefined : slugifyRepoName(path3.basename(toplevel));
-  repoSlugCache.set(start, slug);
+  repoSlugCache.set(key, slug);
   return slug;
 }
-function cursorWorktreePath(request, cwd = request.cwd) {
+function cursorWorktreePath(request, cwd = request.cwd, env = request.env) {
   if (request.provider !== "cursor" || request.access !== "edit-isolated")
     return;
   const name = request.providerOptions?.cursor?.worktreeName;
   if (!name || !CURSOR_WORKTREE_NAME_PATTERN.test(name))
     return;
-  const root = cursorWorktreesRoot(request.env);
-  const slug = cursorRepoSlug(cwd);
+  const root = cursorWorktreesRoot(env);
+  const slug = cursorRepoSlug(cwd, env);
   if (root === undefined || slug === undefined)
     return;
   return path3.resolve(cwd, root, slug, name);
 }
 var modelPromises = new Map;
 function modelListingKey(executable, env) {
-  const entries = env ? Object.keys(env).sort().map((name) => env[name] === undefined ? [name] : [name, env[name]]) : null;
-  return JSON.stringify([executable, entries]);
+  return JSON.stringify([executable, envKeyPart(env)]);
 }
 function parseModels(stdout) {
   return stdout.split(/\r?\n/u).map((line) => line.match(/^([^\s]+)\s+-\s+/u)?.[1]).filter((model) => Boolean(model));
@@ -933,7 +951,7 @@ function describeWorkspace(request, cwd, events, stdout) {
   const worktreeBase = isolated && request.provider === "cursor" ? cursor?.worktreeBase : undefined;
   const disclosed = isolated ? worktreeFromEvents(events, cwd) ?? worktreeFromText(stdout, worktreeName) : undefined;
   const reported = absoluteReported(disclosed, cwd);
-  const derived = isolated && !reported ? cursorWorktreePath(request, cwd) : undefined;
+  const derived = isolated && !reported ? cursorWorktreePath(request, cwd, request.env) : undefined;
   const worktree = reported ?? derived;
   return {
     cwd,

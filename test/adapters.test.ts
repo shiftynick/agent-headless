@@ -396,6 +396,112 @@ describe("CursorAdapter", () => {
   });
 });
 
+describe("Cursor worktree derivation probes git under the request's environment", () => {
+  // The guarantee that an absent `workspace.worktree` proves no worktree exists
+  // rests on the probe seeing git exactly as the Cursor invocation would. These
+  // fixtures put a fake `git` on a PATH that only `request.env` supplies, so a
+  // probe run under the parent environment cannot possibly produce their answer.
+  const isWindows = process.platform === "win32";
+  const root = mkdtempSync(path.join(tmpdir(), "agent-headless-gitenv-"));
+  const counter = path.join(root, "calls.log");
+
+  /** A `git` on PATH that always reports `toplevel`, and records each call. */
+  function shimDir(name: string, toplevel: string): string {
+    const directory = path.join(root, name);
+    mkdirSync(directory, { recursive: true });
+    const executable = path.join(directory, isWindows ? "git.cmd" : "git");
+    writeFileSync(
+      executable,
+      isWindows
+        ? `@echo off\r\necho call>>"${counter}"\r\necho ${toplevel}\r\n`
+        : `#!/bin/sh\necho call >> "${counter}"\necho '${toplevel}'\n`,
+    );
+    if (!isWindows) chmodSync(executable, 0o755);
+    return directory;
+  }
+
+  function calls(): number {
+    if (!existsSync(counter)) return 0;
+    return readFileSync(counter, "utf8").split(/\r?\n/u).filter((line) => line.trim()).length;
+  }
+
+  // A cwd with a `.git` entry real git rejects: it clears the cheap ancestor
+  // pre-check so the probe actually runs, while guaranteeing the *parent*
+  // environment's git answers "not a repository". Any repository slug that comes
+  // back therefore came from the shim.
+  const workdir = path.join(root, "workdir");
+  mkdirSync(workdir, { recursive: true });
+  writeFileSync(path.join(workdir, ".git"), "");
+
+  const shimA = shimDir("bin-a", path.join(root, "Shim Repo"));
+  const shimB = shimDir("bin-b", path.join(root, "Other Repo"));
+
+  function isolated(env?: Record<string, string | undefined>): RunRequest {
+    return request("cursor", {
+      model: "gpt-5",
+      access: "edit-isolated",
+      cwd: workdir,
+      providerOptions: { cursor: { worktreeName: "agent-headless-fixed-env" } },
+      ...(env ? { env } : {}),
+    });
+  }
+
+  afterAll(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test("the probe honours request.env, not the parent environment", () => {
+    // Catches the original implementation, which spawned `git` with the parent
+    // process environment: there the fabricated `.git` makes real git refuse and
+    // derivation returns undefined, whatever request.env says.
+    expect(cursorWorktreePath(isolated({ PATH: shimA }))).toBe(
+      path.join(cursorWorktreesRoot()!, "shim-repo", "agent-headless-fixed-env"),
+    );
+    expect(calls()).toBeGreaterThan(0);
+  });
+
+  test("the same request without that env derives via the parent's git", () => {
+    // The overlay is applied to the inherited environment, never substituted for
+    // it: with no overrides the probe is the parent's git, which refuses this
+    // malformed `.git`. An implementation that passed only the overrides as the
+    // child environment would lose PATH entirely - failing here for the wrong
+    // reason, and failing the shim cases on Windows, where the `.cmd` wrapper
+    // needs ComSpec and PATHEXT from the inherited environment.
+    expect(cursorWorktreePath(isolated())).toBeUndefined();
+    // ...while the inherited environment is genuinely still in play: this repo
+    // resolves only because the parent's PATH reaches git.
+    // ...while the inherited environment is genuinely still in play: this repo
+    // resolves only because the parent's PATH reaches git. A subdirectory no
+    // other test has probed, so the memo cannot answer for it.
+    expect(cursorRepoSlug(path.join(process.cwd(), "src"))).toBeDefined();
+  });
+
+  test("two environments against one cwd do not share a repository-slug entry", () => {
+    // Catches a memo keyed on cwd alone: this lookup would be served the first
+    // test's answer, reinstating exactly the parity break env threading fixes.
+    expect(cursorWorktreePath(isolated({ PATH: shimB }))).toBe(
+      path.join(cursorWorktreesRoot()!, "other-repo", "agent-headless-fixed-env"),
+    );
+    // And both stay distinct from the no-overlay answer.
+    expect(cursorWorktreePath(isolated())).toBeUndefined();
+    expect(cursorRepoSlug(workdir, { PATH: shimA })).toBe("shim-repo");
+  });
+
+  test("identical environments in different key orders share one cached entry", () => {
+    // The key comes from the same encoder as `modelListingKey`, so order
+    // independence and present-but-undefined-vs-absent hold here too; this
+    // asserts the memo actually consults it.
+    const first = calls();
+    expect(cursorRepoSlug(workdir, { CURSOR_TEAM: "t", PATH: shimA })).toBe("shim-repo");
+    expect(calls()).toBe(first + 1);
+    expect(cursorRepoSlug(workdir, { PATH: shimA, CURSOR_TEAM: "t" })).toBe("shim-repo");
+    expect(calls()).toBe(first + 1);
+    // A deleted variable is its own environment, not the untouched one.
+    expect(cursorRepoSlug(workdir, { CURSOR_TEAM: undefined, PATH: shimA })).toBe("shim-repo");
+    expect(calls()).toBe(first + 2);
+  });
+});
+
 describe("tolerant JSONL parsing", () => {
   test("skips a non-JSON banner line and keeps every real event", () => {
     const parsed = parseJsonLines("cursor", [
