@@ -547,6 +547,9 @@ class CodexAdapter {
 
 // src/adapters/cursor.ts
 import { randomUUID } from "node:crypto";
+import { existsSync as existsSync2 } from "node:fs";
+import { homedir } from "node:os";
+import path3 from "node:path";
 function cursorModel(model, effort) {
   if (!effort)
     return model;
@@ -582,6 +585,54 @@ function withDefaultWorktreeName(request, generate) {
       cursor: { ...cursor, worktreeName: generate() }
     }
   };
+}
+var CURSOR_WORKTREES_ROOT_ENV = "CURSOR_WORKTREES_ROOT";
+var CURSOR_WORKTREE_NAME_PATTERN = /^[A-Za-z0-9._-]+$/u;
+function childEnvValue(name, env) {
+  for (const key of Object.keys(env ?? {})) {
+    const matches = process.platform === "win32" ? key.toLowerCase() === name.toLowerCase() : key === name;
+    if (matches)
+      return env[key];
+  }
+  return process.env[name];
+}
+function cursorWorktreesRoot(env) {
+  const configured = childEnvValue(CURSOR_WORKTREES_ROOT_ENV, env);
+  if (configured !== undefined)
+    return configured;
+  try {
+    const home = homedir();
+    return home ? path3.join(home, ".cursor", "worktrees") : undefined;
+  } catch {
+    return;
+  }
+}
+function slugifyRepoName(name) {
+  const slug = name.toLowerCase().replace(/[^a-z0-9._-]+/gu, "-").replace(/-+/gu, "-").replace(/^-+|-+$/gu, "");
+  return slug || "worktree";
+}
+function cursorRepoSlug(cwd) {
+  let current = path3.resolve(cwd);
+  for (;; ) {
+    if (existsSync2(path3.join(current, ".git")))
+      return slugifyRepoName(path3.basename(current));
+    const parent = path3.dirname(current);
+    if (parent === current)
+      return;
+    current = parent;
+  }
+}
+function cursorWorktreePath(request, cwd = request.cwd) {
+  if (request.provider !== "cursor" || request.access !== "edit-isolated")
+    return;
+  const name = request.providerOptions?.cursor?.worktreeName;
+  if (!name || !CURSOR_WORKTREE_NAME_PATTERN.test(name))
+    return;
+  const root = cursorWorktreesRoot(request.env);
+  const slug = cursorRepoSlug(cwd);
+  if (root === undefined || slug === undefined)
+    return;
+  return path3.resolve(cwd, root, slug, name);
 }
 var modelPromises = new Map;
 function modelListingKey(executable, env) {
@@ -753,13 +804,13 @@ function getAdapter(provider) {
 }
 
 // src/validation.ts
-import { existsSync as existsSync2, realpathSync, statSync } from "node:fs";
+import { existsSync as existsSync3, realpathSync, statSync } from "node:fs";
 function normalizeRequest(request) {
   if (!request.prompt?.trim())
     invalid("prompt must be non-empty");
   if (!request.cwd)
     invalid("cwd is required");
-  if (!existsSync2(request.cwd) || !statSync(request.cwd).isDirectory()) {
+  if (!existsSync3(request.cwd) || !statSync(request.cwd).isDirectory()) {
     invalid(`cwd is not an existing directory: ${request.cwd}`);
   }
   if (request.timeoutMs !== undefined && (!Number.isFinite(request.timeoutMs) || request.timeoutMs <= 0)) {
@@ -771,7 +822,7 @@ function normalizeRequest(request) {
   if (request.model !== undefined && !request.model.trim())
     invalid("model must be non-empty");
   const additionalDirs = request.additionalDirs?.map((directory) => {
-    if (!existsSync2(directory) || !statSync(directory).isDirectory()) {
+    if (!existsSync3(directory) || !statSync(directory).isDirectory()) {
       invalid(`additional directory does not exist: ${directory}`);
     }
     return realpathSync(directory);
@@ -788,11 +839,11 @@ function normalizeRequest(request) {
 }
 
 // src/workspace.ts
-import path3 from "node:path";
+import path4 from "node:path";
 var WORKTREE_KEYS = ["worktree_path", "worktreePath", "worktree_dir", "worktreeDir", "worktree"];
 function samePath(left, right) {
   const normalize = (value) => {
-    const resolved = path3.normalize(value).replace(/[\\/]+$/u, "");
+    const resolved = path4.normalize(value).replace(/[\\/]+$/u, "");
     return process.platform === "win32" ? resolved.toLowerCase() : resolved;
   };
   return normalize(left) === normalize(right);
@@ -839,11 +890,14 @@ function describeWorkspace(request, cwd, events, stdout) {
   const cursor = request.providerOptions?.cursor;
   const worktreeName = !isolated ? undefined : request.provider === "cursor" ? cursor?.worktreeName : request.provider === "claude" ? request.providerOptions?.claude?.worktreeName ?? "agent-headless" : undefined;
   const worktreeBase = isolated && request.provider === "cursor" ? cursor?.worktreeBase : undefined;
-  const worktree = isolated ? worktreeFromEvents(events, cwd) ?? worktreeFromText(stdout, worktreeName) : undefined;
+  const reported = isolated ? worktreeFromEvents(events, cwd) ?? worktreeFromText(stdout, worktreeName) : undefined;
+  const derived = isolated && !reported ? cursorWorktreePath(request, cwd) : undefined;
+  const worktree = reported ?? derived;
   return {
     cwd,
     access: request.access,
-    ...worktree ? { worktree } : {},
+    ...worktree ? { worktree, worktreeSource: reported ? "reported" : "derived" } : {},
+    ...derived ? { worktreeRoot: path4.dirname(derived) } : {},
     ...worktreeName ? { worktreeName } : {},
     ...worktreeBase ? { worktreeBase } : {}
   };
@@ -1004,6 +1058,9 @@ export {
   getAdapter,
   generateWorktreeName,
   describeWorkspace,
+  cursorWorktreesRoot,
+  cursorWorktreePath,
+  cursorRepoSlug,
   assertSucceeded,
   WORKTREE_NAME_PREFIX,
   VERSION,
@@ -1011,6 +1068,8 @@ export {
   CursorAdapter,
   CodexAdapter,
   ClaudeAdapter,
+  CURSOR_WORKTREE_NAME_PATTERN,
+  CURSOR_WORKTREES_ROOT_ENV,
   CURSOR_DEFAULT_MODEL,
   AgentHeadlessError
 };

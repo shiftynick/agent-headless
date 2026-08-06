@@ -1,4 +1,5 @@
 import path from "node:path";
+import { cursorWorktreePath } from "./adapters/cursor";
 import { asRecord } from "./jsonl";
 import type { AgentEvent, RunRequest, WorkspaceInfo } from "./types";
 
@@ -58,7 +59,13 @@ function worktreeFromText(stdout: string, worktreeName?: string): string | undef
 /**
  * Describes where a run's work went. Always reports cwd and access; for isolated
  * runs it also reports the worktree name/base the runner chose (known regardless
- * of output readability) plus the observed worktree path when it is discoverable.
+ * of output readability) and the worktree path itself.
+ *
+ * The path is taken from the provider when the provider disclosed one - it is
+ * authoritative about where it actually put the work - and otherwise derived
+ * from the pinned name and Cursor's fixed worktree layout. Deriving is what
+ * makes the path survive the case the parsed path cannot: output that could not
+ * be read at all, which is exactly when a caller most needs to find the work.
  */
 export function describeWorkspace(
   request: RunRequest,
@@ -76,13 +83,16 @@ export function describeWorkspace(
         ? request.providerOptions?.claude?.worktreeName ?? "agent-headless"
         : undefined;
   const worktreeBase = isolated && request.provider === "cursor" ? cursor?.worktreeBase : undefined;
-  const worktree = isolated
+  const reported = isolated
     ? worktreeFromEvents(events, cwd) ?? worktreeFromText(stdout, worktreeName)
     : undefined;
+  const derived = isolated && !reported ? cursorWorktreePath(request, cwd) : undefined;
+  const worktree = reported ?? derived;
   return {
     cwd,
     access: request.access!,
-    ...(worktree ? { worktree } : {}),
+    ...(worktree ? { worktree, worktreeSource: reported ? "reported" as const : "derived" as const } : {}),
+    ...(derived ? { worktreeRoot: path.dirname(derived) } : {}),
     ...(worktreeName ? { worktreeName } : {}),
     ...(worktreeBase ? { worktreeBase } : {}),
   };

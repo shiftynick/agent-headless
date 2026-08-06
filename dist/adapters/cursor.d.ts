@@ -31,6 +31,46 @@ export declare function generateWorktreeName(): string;
  */
 export declare function withDefaultWorktreeName(request: RunRequest, generate: () => string): RunRequest;
 /**
+ * Environment variable Cursor reads to relocate the directory that holds every
+ * named worktree. Unset, Cursor uses `~/.cursor/worktrees`.
+ */
+export declare const CURSOR_WORKTREES_ROOT_ENV = "CURSOR_WORKTREES_ROOT";
+/**
+ * Names Cursor accepts for `--worktree`. Cursor validates rather than sanitizes:
+ * anything outside this set aborts the run, so a name that fails it never
+ * produces a worktree and must never produce a derived path either.
+ */
+export declare const CURSOR_WORKTREE_NAME_PATTERN: RegExp;
+/**
+ * Directory Cursor will place named worktrees under, or `undefined` when it
+ * cannot be determined (no resolvable home directory and no explicit override).
+ * An empty override is passed through rather than replaced, because Cursor
+ * itself only substitutes the default when the variable is entirely absent.
+ */
+export declare function cursorWorktreesRoot(env?: Record<string, string | undefined>): string | undefined;
+/**
+ * The per-repository directory Cursor nests worktrees in: the slugified base
+ * name of the repository root. Cursor finds that root with
+ * `git rev-parse --show-toplevel`; walking up for a `.git` entry finds the same
+ * directory (a linked worktree or submodule has a `.git` *file* at its root)
+ * without spending a subprocess on every run. Returns `undefined` outside a Git
+ * repository, where an isolated Cursor run cannot start at all.
+ */
+export declare function cursorRepoSlug(cwd: string): string | undefined;
+/**
+ * Where an isolated Cursor run's worktree is, computed *before* the provider
+ * emits anything. Cursor places a named worktree at
+ * `<worktrees-root>/<repo-slug>/<name>`, and the runner always pins the name -
+ * so the location is a function of the request, not of the provider's output.
+ * That is what keeps a run locatable when its stream is unreadable, the very
+ * case a parsed path cannot cover.
+ *
+ * `undefined` (never a guess) when any input is missing: a non-isolated or
+ * non-Cursor request, a name Cursor would reject, no determinable root, or a
+ * cwd outside a Git repository.
+ */
+export declare function cursorWorktreePath(request: RunRequest, cwd?: string): string | undefined;
+/**
  * Cache key for a model listing, covering the whole environment it was made
  * under - two installations, or two accounts, can offer different models.
  *

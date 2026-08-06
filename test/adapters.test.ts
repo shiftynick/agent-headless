@@ -1,12 +1,16 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import {
   ClaudeAdapter,
   CodexAdapter,
   CURSOR_DEFAULT_MODEL,
+  CURSOR_WORKTREES_ROOT_ENV,
   CursorAdapter,
+  cursorRepoSlug,
+  cursorWorktreePath,
+  cursorWorktreesRoot,
   generateWorktreeName,
   modelListingKey,
 } from "../src/adapters";
@@ -245,6 +249,77 @@ describe("CursorAdapter", () => {
       expect(name).toMatch(/^agent-headless-[a-z0-9-]+$/u);
       expect(name.length).toBeLessThanOrEqual(48);
     }
+  });
+
+  test("the worktree root follows the child's environment, not this process's", () => {
+    const fallback = path.join(homedir(), ".cursor", "worktrees");
+    expect(cursorWorktreesRoot()).toBe(process.env[CURSOR_WORKTREES_ROOT_ENV] ?? fallback);
+    expect(cursorWorktreesRoot({ [CURSOR_WORKTREES_ROOT_ENV]: "/srv/worktrees" })).toBe("/srv/worktrees");
+    // An overlay entry set to undefined *removes* the variable from the child,
+    // so the child sees Cursor's default - not this process's inherited value.
+    const previous = process.env[CURSOR_WORKTREES_ROOT_ENV];
+    process.env[CURSOR_WORKTREES_ROOT_ENV] = "/inherited";
+    try {
+      expect(cursorWorktreesRoot({ [CURSOR_WORKTREES_ROOT_ENV]: undefined })).toBe(fallback);
+      expect(cursorWorktreesRoot()).toBe("/inherited");
+    } finally {
+      if (previous === undefined) delete process.env[CURSOR_WORKTREES_ROOT_ENV];
+      else process.env[CURSOR_WORKTREES_ROOT_ENV] = previous;
+    }
+  });
+
+  test("the repository slug comes from the repository root, slugified as Cursor does", () => {
+    const parent = mkdtempSync(path.join(tmpdir(), "agent-headless-repo-"));
+    try {
+      const repository = path.join(parent, "My Repo!");
+      const nested = path.join(repository, "packages", "api");
+      mkdirSync(path.join(repository, ".git"), { recursive: true });
+      mkdirSync(nested, { recursive: true });
+
+      // Not `basename(cwd)`: Cursor slugs the repository root it resolves with
+      // `git rev-parse --show-toplevel`, whatever subdirectory the run starts in.
+      expect(cursorRepoSlug(nested)).toBe("my-repo");
+      expect(cursorRepoSlug(repository)).toBe("my-repo");
+      // The filesystem root, rather than the temp directory, stands in for "no
+      // repository": on a machine whose home directory is itself a Git repo
+      // (dotfiles), everything under it - including temp - has an ancestor `.git`.
+      expect(cursorRepoSlug(path.parse(parent).root)).toBeUndefined();
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  test("a linked worktree's .git file still identifies the repository root", () => {
+    const parent = mkdtempSync(path.join(tmpdir(), "agent-headless-linked-"));
+    try {
+      const linked = path.join(parent, "checkout");
+      mkdirSync(linked, { recursive: true });
+      // Git writes a `.git` *file* in a linked worktree or submodule; a check
+      // that only accepts a directory would walk past the root and misreport.
+      writeFileSync(path.join(linked, ".git"), "gitdir: ../repo/.git/worktrees/checkout\n");
+      expect(cursorRepoSlug(linked)).toBe("checkout");
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  test("a worktree path is derived only where one actually exists", async () => {
+    const isolated = await adapter.prepare(
+      request("cursor", { model: "gpt-5", access: "edit-isolated" }),
+      { generateWorktreeName: () => "agent-headless-fixed-8" },
+    );
+    expect(cursorWorktreePath(isolated)).toBe(
+      path.join(cursorWorktreesRoot()!, cursorRepoSlug(process.cwd())!, "agent-headless-fixed-8"),
+    );
+
+    // Every one of these would otherwise name a directory that never exists.
+    expect(cursorWorktreePath({ ...isolated, access: "inspect" })).toBeUndefined();
+    expect(cursorWorktreePath({ ...isolated, provider: "claude" })).toBeUndefined();
+    expect(cursorWorktreePath({ ...isolated, cwd: path.parse(tmpdir()).root })).toBeUndefined();
+    expect(cursorWorktreePath({
+      ...isolated,
+      providerOptions: { cursor: { worktreeName: "feature/thing" } },
+    })).toBeUndefined();
   });
 
   test("rejects ephemeral sessions and schemas", () => {

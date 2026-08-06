@@ -14,12 +14,22 @@
 - Where a stream holds more than one terminal marker, the last one decides, for
   every provider: a success result followed by an `error` is `failed`, and an
   `error` followed by a later success result is `succeeded`.
-- Every run reports `result.workspace` (cwd, access, and isolated worktree
-  name/base plus the observed worktree path when discoverable), so delegated
-  work is locatable on success, failure, timeout, and cancellation alike. The
-  field is required on `AgentResult`, so consumers need no null check. Only a
-  session/init event's differing `cwd` is read as the worktree; a tool or status
-  event's `cwd` is not.
+- Every run reports `result.workspace` (cwd, access, and for isolated runs the
+  worktree name, the `--worktree-base` Git ref, and the worktree path itself), so
+  delegated work is locatable on success, failure, timeout, and cancellation
+  alike. The field is required on `AgentResult`, so consumers need no null check.
+  Only a session/init event's differing `cwd` is read as the worktree; a tool or
+  status event's `cwd` is not.
+- `workspace.worktree` no longer depends on parsing the provider's stream, which
+  made it absent in exactly the cases it exists for. When the provider discloses
+  no path, the runner derives one from the worktree name it pinned and Cursor's
+  fixed layout (`<CURSOR_WORKTREES_ROOT|~/.cursor/worktrees>/<repo-slug>/<name>`),
+  so an `unparsed`, `failed`, `timed-out` or `cancelled` isolated Cursor run
+  still reports an absolute path. New `workspace.worktreeSource`
+  (`reported` | `derived`) says which, and `workspace.worktreeRoot` accompanies a
+  derived path. Nothing is guessed: the path is omitted when no worktree can
+  exist. `cursorWorktreePath`, `cursorWorktreesRoot` and `cursorRepoSlug` are
+  exported so callers can compute the same location.
 - `listModels(provider, options)` accepts the executable and env to list from,
   and the listing offered after a rejected default model is resolved against the
   failed run's own `request.env` rather than process-global config.

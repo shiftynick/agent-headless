@@ -37,6 +37,7 @@ export interface RunRequest {
     claude?: { allowedTools?: string[]; safeMode?: boolean; worktreeName?: string };
     cursor?: {
       worktreeName?: string;
+      /** Git ref the isolated worktree branches from (Cursor's `--worktree-base`). */
       worktreeBase?: string;
       streamPartialOutput?: boolean;
       trustWorkspace?: boolean;
@@ -64,12 +65,31 @@ export interface WorkspaceInfo {
   /** The resolved working directory the provider was launched in. */
   cwd: string;
   access: AccessMode;
-  /** Actual isolated worktree path, when it could be observed in provider output. */
+  /**
+   * Absolute path of the isolated worktree. For Cursor this is present on every
+   * outcome - including unreadable, failed, timed-out and cancelled runs -
+   * because it is constructed from the pinned worktree name and Cursor's fixed
+   * layout rather than read out of the stream. See `worktreeSource`.
+   */
   worktree?: string;
   /** Worktree name the runner asked for; known even when the stream is unreadable. */
   worktreeName?: string;
-  /** Worktree base the runner asked for; known even when the stream is unreadable. */
+  /** Git ref the worktree was asked to branch from; not a directory. */
   worktreeBase?: string;
+  /**
+   * Directory holding the worktree, reported only when `worktree` was derived,
+   * where `worktree === join(worktreeRoot, worktreeName)` holds exactly. Omitted
+   * when the provider disclosed the path itself, since its parent directory is
+   * then the provider's business and not something the runner computed.
+   */
+  worktreeRoot?: string;
+  /**
+   * `reported` - the provider disclosed this path, so it exists. `derived` - the
+   * runner computed where the provider was told to put the work. A derived path
+   * is where the worktree is if the run created one at all; a run that died
+   * before creating it (bad model, cancelled at launch) leaves nothing there.
+   */
+  worktreeSource?: "reported" | "derived";
 }
 
 export interface AgentResult {

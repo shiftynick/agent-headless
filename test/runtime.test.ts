@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { CURSOR_DEFAULT_MODEL, getCapabilities, runAgent } from "../src";
 import { runInvocation } from "../src/process";
-import type { RunAgentOptions, RunRequest } from "../src/types";
+import type { RunAgentOptions, RunRequest, RunStatus } from "../src/types";
 
 const fakeClaude = path.join(import.meta.dir, "fixtures", "fake-claude.cmd");
 
@@ -197,7 +197,10 @@ test("a non-session event's differing cwd is not taken as the worktree", async (
   const result = await runAgent(isolatedCursor, stubbed(stream));
 
   expect(result.status).toBe("succeeded");
-  expect(result.workspace.worktree).toBeUndefined();
+  // A tool event's cwd is never promoted to "the worktree"; with nothing
+  // authoritative disclosed, the reported path is the derived one instead.
+  expect(result.workspace.worktree).not.toBe("/repo/packages/api");
+  expect(result.workspace.worktreeSource).toBe("derived");
   expect(result.workspace.worktreeName).toBe("task-018");
 });
 
@@ -401,6 +404,140 @@ test("concurrent isolated runs do not share a generated worktree name", async ()
 
   expect(first!.workspace?.worktreeName).toMatch(/^agent-headless-/u);
   expect(first!.workspace?.worktreeName).not.toBe(second!.workspace?.worktreeName);
+});
+
+/**
+ * Where Cursor documents it puts a named worktree
+ * (`cursor-agent --help`: "an isolated git worktree at
+ * ~/.cursor/worktrees/<reponame>/<name>"), recomputed here from node builtins
+ * only. Deliberately not imported from the runner: an expectation that calls
+ * the code under test would agree with any implementation, including a wrong one.
+ */
+function cursorWorktreeLocation(cwd: string, name: string, root?: string): string {
+  let repoRoot = path.resolve(cwd);
+  while (!existsSync(path.join(repoRoot, ".git"))) {
+    const parent = path.dirname(repoRoot);
+    if (parent === repoRoot) throw new Error(`no git repository at or above ${cwd}`);
+    repoRoot = parent;
+  }
+  const slug = path.basename(repoRoot).toLowerCase().replace(/[^a-z0-9._-]+/gu, "-");
+  return path.join(root ?? path.join(homedir(), ".cursor", "worktrees"), slug, name);
+}
+
+/** A readable, successful Cursor stream that discloses no worktree path at all. */
+const cursorSilentSuccess = [
+  JSON.stringify({ type: "system", subtype: "init", session_id: "c2", model: "gpt-5", cwd: process.cwd() }),
+  JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "done", session_id: "c2" }),
+].join("\n");
+
+test("every isolated outcome reports the worktree path, readable stream or not", async () => {
+  const name = "agent-headless-fixed-3";
+  const expected = cursorWorktreeLocation(process.cwd(), name);
+  const isolated: RunRequest = { ...bareCursor, model: "gpt-5", access: "edit-isolated" };
+  const outcomes: Array<[RunStatus, RunAgentOptions]> = [
+    ["succeeded", stubbed(cursorSilentSuccess)],
+    ["unparsed", stubbed("banner one\nbanner two")],
+    ["failed", stubbed("banner one\nbanner two", { exitCode: 3, stderr: "boom" })],
+    ["timed-out", stubbed("", { exitCode: null, timedOut: true })],
+    ["cancelled", stubbed("", { exitCode: null, cancelled: true })],
+  ];
+
+  for (const [status, options] of outcomes) {
+    const result = await runAgent(isolated, { ...options, generateWorktreeName: () => name });
+    expect(result.status).toBe(status);
+    expect(result.workspace.worktree).toBe(expected);
+    expect(path.isAbsolute(result.workspace.worktree!)).toBe(true);
+    expect(result.workspace.worktreeSource).toBe("derived");
+  }
+});
+
+test("the reported root and name compose to exactly the reported path", async () => {
+  const result = await runAgent(
+    { ...bareCursor, model: "gpt-5", access: "edit-isolated" },
+    { ...stubbed("banner one\nbanner two"), generateWorktreeName: () => "agent-headless-fixed-5" },
+  );
+  const { worktree, worktreeRoot, worktreeName } = result.workspace;
+
+  expect(path.join(worktreeRoot!, worktreeName!)).toBe(worktree!);
+  // Joined, not concatenated: no doubled or foreign separator survives that.
+  expect(worktree).toBe(path.normalize(worktree!));
+  expect(worktree).toContain(path.sep);
+  expect(worktree).not.toContain(path.sep === "\\" ? "/" : "\\");
+});
+
+test("a worktree path the provider discloses beats the derived one", async () => {
+  const result = await runAgent(isolatedCursor, stubbed(cursorSuccess));
+
+  // The provider is authoritative about where it actually put the work.
+  expect(result.workspace.worktree).toBe("/repo/.worktrees/task-018");
+  expect(result.workspace.worktreeSource).toBe("reported");
+  expect(result.workspace.worktree).not.toBe(cursorWorktreeLocation(process.cwd(), "task-018"));
+  // No root is claimed for a path whose layout the runner did not choose.
+  expect(result.workspace.worktreeRoot).toBeUndefined();
+});
+
+test("a caller-supplied worktree name and base are honored, and the base stays a Git ref", async () => {
+  const options = capturing("banner one\nbanner two");
+  const result = await runAgent(
+    {
+      ...bareCursor,
+      model: "gpt-5",
+      access: "edit-isolated",
+      providerOptions: { cursor: { worktreeName: "task-018", worktreeBase: "release-2.1" } },
+    },
+    { ...options, generateWorktreeName: () => "agent-headless-fixed-6" },
+  );
+
+  expectFlag(options.args(), "--worktree", "task-018");
+  expectFlag(options.args(), "--worktree-base", "release-2.1");
+  expect(result.workspace.worktreeName).toBe("task-018");
+  expect(result.workspace.worktreeBase).toBe("release-2.1");
+  expect(result.workspace.worktree).toBe(cursorWorktreeLocation(process.cwd(), "task-018"));
+  // `--worktree-base` names the branch to fork from; treating it as a directory
+  // would both mislocate the work and hand Cursor a ref it cannot resolve.
+  expect(result.workspace.worktree).not.toContain("release-2.1");
+});
+
+test("a relocated CURSOR_WORKTREES_ROOT moves the reported path with it", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "agent-headless-wt-root-"));
+  try {
+    const result = await runAgent(
+      { ...bareCursor, model: "gpt-5", access: "edit-isolated", env: { CURSOR_WORKTREES_ROOT: root } },
+      { ...stubbed("banner one\nbanner two"), generateWorktreeName: () => "agent-headless-fixed-7" },
+    );
+
+    expect(result.workspace.worktree).toBe(cursorWorktreeLocation(process.cwd(), "agent-headless-fixed-7", root));
+    expect(result.workspace.worktree?.startsWith(root + path.sep)).toBe(true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("no path is invented for a worktree name Cursor would refuse", async () => {
+  const result = await runAgent(
+    {
+      ...bareCursor,
+      model: "gpt-5",
+      access: "edit-isolated",
+      providerOptions: { cursor: { worktreeName: "feature/thing" } },
+    },
+    stubbed("banner one\nbanner two"),
+  );
+
+  // Cursor validates `--worktree` against [A-Za-z0-9._-]+ and aborts otherwise,
+  // so no worktree exists to point at - reporting a joined path would be fiction.
+  expect(result.workspace.worktreeName).toBe("feature/thing");
+  expect(result.workspace.worktree).toBeUndefined();
+  expect(result.workspace.worktreeRoot).toBeUndefined();
+  expect(result.workspace.worktreeSource).toBeUndefined();
+});
+
+test("a non-isolated run reports no worktree of any kind", async () => {
+  const result = await runAgent({ ...bareCursor, model: "gpt-5", access: "inspect" }, stubbed(cursorSilentSuccess));
+
+  expect(result.workspace.access).toBe("inspect");
+  expect(result.workspace.worktree).toBeUndefined();
+  expect(result.workspace.worktreeRoot).toBeUndefined();
 });
 
 test("mid-run cancellation terminates a live provider process", async () => {

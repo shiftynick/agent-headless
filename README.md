@@ -91,10 +91,10 @@ reported as bounded entries in `result.warnings`.
 
 Every run reports `result.workspace` - required on `AgentResult`, so no null
 check is needed - carrying the `cwd` the provider ran in, the effective `access`
-mode, and for isolated runs the `worktreeName`/`worktreeBase` the runner chose
-plus the observed `worktree` path when the provider disclosed one (read only
-from a session/init event, never from a tool or status event's `cwd`). That
-makes delegated work locatable even when the stream is unreadable.
+mode, and for isolated runs the `worktreeName` the runner pinned, the
+`worktreeBase` Git ref when one was requested, and the `worktree` path itself.
+See [Isolated worktrees are always located](#isolated-worktrees-are-always-located)
+for where that path comes from and when it can still be absent.
 
 ### Cursor's default model
 
@@ -116,7 +116,7 @@ If Cursor rejects the model, the result's `warnings` say so and point at
 live model list is fetched once and included, since the caller never chose it.
 No model listing happens on any other path.
 
-### Isolated worktrees are always named
+### Isolated worktrees are always located
 
 Cursor accepts a bare `--worktree` and then names the worktree itself without
 reporting the choice, which loses the work when the stream is unreadable. The
@@ -126,6 +126,33 @@ without `providerOptions.cursor.worktreeName`, it generates
 `result.workspace.worktreeName` on every outcome, failures and timeouts included.
 A caller-supplied name is used and reported unchanged. Tests can pin the
 generated name with the `generateWorktreeName` option of `runAgent`.
+
+A name is not a location, so the runner also reports `workspace.worktree`, an
+absolute path, on every outcome:
+
+- `workspace.worktreeSource === "reported"` - the provider disclosed the path and
+  it wins, because the provider is authoritative about where it put the work.
+- `workspace.worktreeSource === "derived"` - the runner constructed the path from
+  the pinned name and Cursor's fixed layout,
+  `<CURSOR_WORKTREES_ROOT|~/.cursor/worktrees>/<repo-slug>/<name>`, where
+  `repo-slug` is the slugified base name of the repository root. Nothing is
+  parsed, so the path is known before the provider writes a byte - which is what
+  makes an `unparsed`, `failed`, `timed-out` or `cancelled` run locatable.
+  `workspace.worktreeRoot` is reported alongside it and
+  `join(worktreeRoot, worktreeName)` is exactly `worktree`. A derived path says
+  where the worktree is *if the run got far enough to create one*; a run that
+  died at launch leaves nothing there.
+
+`providerOptions.cursor.worktreeBase` is Cursor's `--worktree-base`: the Git ref
+the worktree branches from, **not** a directory. Cursor has no flag for the
+location; export `CURSOR_WORKTREES_ROOT` (honoured through `request.env`) to
+move it. `workspace.worktree` is omitted rather than guessed when no worktree can
+exist - a `worktreeName` outside Cursor's `[A-Za-z0-9._-]+`, a `cwd` outside a Git
+repository, or no resolvable home directory - and, for Claude's `--worktree`,
+whenever its output discloses no path, since Claude documents no fixed layout.
+
+`cursorWorktreePath`, `cursorWorktreesRoot` and `cursorRepoSlug` are exported for
+callers that want to compute or verify the location themselves.
 
 ## Compatibility matrix
 

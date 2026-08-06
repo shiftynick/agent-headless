@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import path from "node:path";
 import { unsupported } from "../errors";
 import { asRecord, numberValue, parseJsonLines } from "../jsonl";
 import { probeExecutable, runInvocation } from "../process";
@@ -80,6 +83,103 @@ export function withDefaultWorktreeName(request: RunRequest, generate: () => str
       cursor: { ...cursor, worktreeName: generate() },
     },
   };
+}
+
+/**
+ * Environment variable Cursor reads to relocate the directory that holds every
+ * named worktree. Unset, Cursor uses `~/.cursor/worktrees`.
+ */
+export const CURSOR_WORKTREES_ROOT_ENV = "CURSOR_WORKTREES_ROOT";
+
+/**
+ * Names Cursor accepts for `--worktree`. Cursor validates rather than sanitizes:
+ * anything outside this set aborts the run, so a name that fails it never
+ * produces a worktree and must never produce a derived path either.
+ */
+export const CURSOR_WORKTREE_NAME_PATTERN = /^[A-Za-z0-9._-]+$/u;
+
+/**
+ * Reads a variable as the launched child will see it. `runInvocation` overlays
+ * `request.env` onto the inherited environment, where an explicit `undefined`
+ * *removes* the variable - so an overlay entry always wins, even when its value
+ * is `undefined`, and only the absence of an entry falls through to
+ * `process.env`. Key matching is case-insensitive on Windows for the same
+ * reason it is there: Windows environment variables are.
+ */
+function childEnvValue(name: string, env?: Record<string, string | undefined>): string | undefined {
+  for (const key of Object.keys(env ?? {})) {
+    const matches = process.platform === "win32" ? key.toLowerCase() === name.toLowerCase() : key === name;
+    if (matches) return env![key];
+  }
+  return process.env[name];
+}
+
+/**
+ * Directory Cursor will place named worktrees under, or `undefined` when it
+ * cannot be determined (no resolvable home directory and no explicit override).
+ * An empty override is passed through rather than replaced, because Cursor
+ * itself only substitutes the default when the variable is entirely absent.
+ */
+export function cursorWorktreesRoot(env?: Record<string, string | undefined>): string | undefined {
+  const configured = childEnvValue(CURSOR_WORKTREES_ROOT_ENV, env);
+  if (configured !== undefined) return configured;
+  try {
+    const home = homedir();
+    return home ? path.join(home, ".cursor", "worktrees") : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Mirrors Cursor's slugging of the repository directory name. */
+function slugifyRepoName(name: string): string {
+  const slug = name.toLowerCase()
+    .replace(/[^a-z0-9._-]+/gu, "-")
+    .replace(/-+/gu, "-")
+    .replace(/^-+|-+$/gu, "");
+  return slug || "worktree";
+}
+
+/**
+ * The per-repository directory Cursor nests worktrees in: the slugified base
+ * name of the repository root. Cursor finds that root with
+ * `git rev-parse --show-toplevel`; walking up for a `.git` entry finds the same
+ * directory (a linked worktree or submodule has a `.git` *file* at its root)
+ * without spending a subprocess on every run. Returns `undefined` outside a Git
+ * repository, where an isolated Cursor run cannot start at all.
+ */
+export function cursorRepoSlug(cwd: string): string | undefined {
+  let current = path.resolve(cwd);
+  for (;;) {
+    if (existsSync(path.join(current, ".git"))) return slugifyRepoName(path.basename(current));
+    const parent = path.dirname(current);
+    if (parent === current) return undefined;
+    current = parent;
+  }
+}
+
+/**
+ * Where an isolated Cursor run's worktree is, computed *before* the provider
+ * emits anything. Cursor places a named worktree at
+ * `<worktrees-root>/<repo-slug>/<name>`, and the runner always pins the name -
+ * so the location is a function of the request, not of the provider's output.
+ * That is what keeps a run locatable when its stream is unreadable, the very
+ * case a parsed path cannot cover.
+ *
+ * `undefined` (never a guess) when any input is missing: a non-isolated or
+ * non-Cursor request, a name Cursor would reject, no determinable root, or a
+ * cwd outside a Git repository.
+ */
+export function cursorWorktreePath(request: RunRequest, cwd: string = request.cwd): string | undefined {
+  if (request.provider !== "cursor" || request.access !== "edit-isolated") return undefined;
+  const name = request.providerOptions?.cursor?.worktreeName;
+  if (!name || !CURSOR_WORKTREE_NAME_PATTERN.test(name)) return undefined;
+  const root = cursorWorktreesRoot(request.env);
+  const slug = cursorRepoSlug(cwd);
+  if (root === undefined || slug === undefined) return undefined;
+  // Resolved against cwd because Cursor resolves a relative root against its own
+  // working directory, which is this cwd; an absolute root is unaffected.
+  return path.resolve(cwd, root, slug, name);
 }
 
 const modelPromises = new Map<string, Promise<string[]>>();
@@ -207,6 +307,10 @@ export class CursorAdapter implements ProviderAdapter {
     if (request.access === "inspect") args.push("--mode", "plan");
     if (request.access === "edit-isolated") {
       args.push("--worktree", options!.worktreeName!);
+      // `--worktree-base` is the Git ref the new worktree branches from, not a
+      // directory. The worktree's *location* has no flag: Cursor always uses
+      // `<CURSOR_WORKTREES_ROOT|~/.cursor/worktrees>/<repo-slug>/<name>`, which
+      // `cursorWorktreePath` reconstructs.
       if (options?.worktreeBase) args.push("--worktree-base", options.worktreeBase);
       if (process.platform !== "win32") args.push("--sandbox", "enabled");
     }

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { runAgent, VERSION } from "../dist/index.js";
 
@@ -30,7 +31,11 @@ test("the packaged library runs on Node and accepts a deterministic executor", a
     },
   );
 
-  assert.equal(VERSION, "0.2.0");
+  // Compared against the manifest rather than a literal: a hardcoded version
+  // goes stale at the next release and then fails for the wrong reason, which is
+  // exactly what it did between 0.2.0 and 0.3.0.
+  const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  assert.equal(VERSION, manifest.version);
   assert.equal(captured.stdin, "Say OK");
   assert.equal(result.status, "succeeded");
   assert.equal(result.finalText, "OK");
