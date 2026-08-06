@@ -1,4 +1,5 @@
 import { AgentHeadlessError, unsupported } from "../errors";
+import { envValue } from "../process";
 import { asRecord } from "../jsonl";
 import type { AgentEvent, ParsedOutput, Provider, RunRequest, SessionMode } from "../types";
 
@@ -59,7 +60,9 @@ export function providerFailureMessage(label: string, event: AgentEvent): string
 export function envExecutable(provider: Provider, requestEnv?: Record<string, string | undefined>): string {
   const key = provider === "claude" ? "CLAUDE_BIN" : provider === "codex" ? "CODEX_BIN" : "CURSOR_AGENT_BIN";
   const fallback = provider === "cursor" ? "agent" : provider;
-  return requestEnv?.[key] || process.env[key] || fallback;
+  // requestEnv is a plain object, so a case-sensitive read would ignore a
+  // differently cased override that the child environment will honour.
+  return (requestEnv ? envValue(requestEnv, key) : undefined) || process.env[key] || fallback;
 }
 
 export function assertAccess(request: RunRequest, allowed: string[]): void {

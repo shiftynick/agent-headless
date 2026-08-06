@@ -79,11 +79,21 @@ function numberValue(value) {
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
+function envValue(env, name) {
+  if (process.platform !== "win32")
+    return env[name];
+  const lower = name.toLowerCase();
+  for (const key of Object.keys(env)) {
+    if (key.toLowerCase() === lower)
+      return env[key];
+  }
+  return;
+}
 function resolveOnWindows(command, env) {
   if (process.platform !== "win32" || path.isAbsolute(command) || /[\\/]/u.test(command))
     return command;
-  const pathValue = env.PATH ?? env.Path ?? env.path ?? "";
-  const extensions = (env.PATHEXT ?? env.Pathext ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean);
+  const pathValue = envValue(env, "PATH") ?? "";
+  const extensions = (envValue(env, "PATHEXT") ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean);
   for (const directory of pathValue.split(path.delimiter).filter(Boolean)) {
     for (const extension of extensions) {
       const candidate = path.join(directory, `${command}${extension}`);
@@ -111,7 +121,7 @@ function resolveCommand(command, args, env) {
   if (process.platform === "win32" && /\.(?:cmd|bat)$/iu.test(resolved)) {
     const commandLine = `"${[resolved, ...args].map(quoteCmd).join(" ")}"`;
     return {
-      command: env.ComSpec || env.COMSPEC || "cmd.exe",
+      command: envValue(env, "ComSpec") || "cmd.exe",
       args: ["/d", "/s", "/c", commandLine],
       windowsVerbatimArguments: true
     };
@@ -285,7 +295,7 @@ function providerFailureMessage(label, event) {
 function envExecutable(provider, requestEnv) {
   const key = provider === "claude" ? "CLAUDE_BIN" : provider === "codex" ? "CODEX_BIN" : "CURSOR_AGENT_BIN";
   const fallback = provider === "cursor" ? "agent" : provider;
-  return requestEnv?.[key] || process.env[key] || fallback;
+  return (requestEnv ? envValue(requestEnv, key) : undefined) || process.env[key] || fallback;
 }
 function assertAccess(request, allowed) {
   if (!allowed.includes(request.access)) {

@@ -2,6 +2,8 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
+import { effectiveEnv, envValue, resolveCommand } from "../src/process";
+import { envExecutable } from "../src/adapters/shared";
 import path from "node:path";
 import {
   ClaudeAdapter,
@@ -791,5 +793,41 @@ describe("memo keys under Windows case-insensitive resolution", () => {
     const a = modelListingKey("git", { PATH: "A", Path: "B" });
     const b = modelListingKey("git", { Path: "B", PATH: "A" });
     expect(a).toBe(b); // same set of (name,value) pairs; order alone must not split the cache
+  });
+});
+
+describe("environment reads mirror Windows case-insensitivity", () => {
+  const winOnly = process.platform === "win32" ? test : test.skip;
+
+  winOnly("an arbitrarily cased ComSpec override is honoured for .cmd wrapping", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "ah-comspec-"));
+    try {
+      writeFileSync(path.join(dir, "tool.cmd"), "@echo ok\r\n");
+      const wrapped = resolveCommand("tool", [], effectiveEnv({ pAtH: dir, CoMsPeC: "custom-shell.exe" }));
+      expect(wrapped.command).toBe("custom-shell.exe");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  winOnly("an arbitrarily cased PATH override still resolves a .cmd on disk", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "ah-path-"));
+    try {
+      writeFileSync(path.join(dir, "zzfind.cmd"), "@echo ok\r\n");
+      const wrapped = resolveCommand("zzfind", [], effectiveEnv({ pAtH: dir }));
+      expect(wrapped.args.join(" ").toLowerCase()).toContain("zzfind.cmd");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  winOnly("an arbitrarily cased provider-bin override selects the executable", () => {
+    expect(envExecutable("claude", { claude_bin: "X:/somewhere/claude-custom.exe" }))
+      .toBe("X:/somewhere/claude-custom.exe");
+  });
+
+  test("case-sensitive platforms keep case-sensitive reads", () => {
+    if (process.platform === "win32") return;
+    expect(envValue({ path: "/x" }, "PATH")).toBeUndefined();
   });
 });

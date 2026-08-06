@@ -13,6 +13,15 @@ export interface ExecutableProbe {
     version?: string;
     reason?: string;
 }
+/**
+ * Reads one variable from an environment the way Windows itself would: by
+ * name, ignoring case. Every JS-side read of an environment the child will
+ * receive must go through this on win32 - a case-sensitive property access
+ * diverges from what the spawned process experiences, and that divergence is
+ * exactly how an equivalent overlay ends up resolving differently here than
+ * it does for the provider.
+ */
+export declare function envValue(env: NodeJS.ProcessEnv, name: string): string | undefined;
 export declare function resolveOnWindows(command: string, env: NodeJS.ProcessEnv): string;
 /**
  * The environment a child launched with these overrides actually receives:

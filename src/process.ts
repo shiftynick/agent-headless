@@ -20,10 +20,27 @@ export interface ExecutableProbe {
   reason?: string;
 }
 
+/**
+ * Reads one variable from an environment the way Windows itself would: by
+ * name, ignoring case. Every JS-side read of an environment the child will
+ * receive must go through this on win32 - a case-sensitive property access
+ * diverges from what the spawned process experiences, and that divergence is
+ * exactly how an equivalent overlay ends up resolving differently here than
+ * it does for the provider.
+ */
+export function envValue(env: NodeJS.ProcessEnv, name: string): string | undefined {
+  if (process.platform !== "win32") return env[name];
+  const lower = name.toLowerCase();
+  for (const key of Object.keys(env)) {
+    if (key.toLowerCase() === lower) return env[key];
+  }
+  return undefined;
+}
+
 export function resolveOnWindows(command: string, env: NodeJS.ProcessEnv): string {
   if (process.platform !== "win32" || path.isAbsolute(command) || /[\\/]/u.test(command)) return command;
-  const pathValue = env.PATH ?? env.Path ?? env.path ?? "";
-  const extensions = (env.PATHEXT ?? env.Pathext ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean);
+  const pathValue = envValue(env, "PATH") ?? "";
+  const extensions = (envValue(env, "PATHEXT") ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean);
   for (const directory of pathValue.split(path.delimiter).filter(Boolean)) {
     for (const extension of extensions) {
       const candidate = path.join(directory, `${command}${extension}`);
@@ -83,7 +100,7 @@ export function resolveCommand(
   if (process.platform === "win32" && /\.(?:cmd|bat)$/iu.test(resolved)) {
     const commandLine = `"${[resolved, ...args].map(quoteCmd).join(" ")}"`;
     return {
-      command: env.ComSpec || env.COMSPEC || "cmd.exe",
+      command: envValue(env, "ComSpec") || "cmd.exe",
       args: ["/d", "/s", "/c", commandLine],
       windowsVerbatimArguments: true,
     };
