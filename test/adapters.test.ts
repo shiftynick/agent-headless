@@ -19,6 +19,7 @@ import {
 } from "../src/adapters";
 import { AgentHeadlessError } from "../src/errors";
 import { MAX_JSONL_WARNINGS, parseJsonLines } from "../src/jsonl";
+import { SUPPORTED_MODELS } from "../src/models";
 import type { Provider, RunRequest } from "../src/types";
 import { normalizeRequest } from "../src/validation";
 
@@ -88,9 +89,9 @@ describe("CodexAdapter", () => {
   const adapter = new CodexAdapter();
 
   test("maps effort through a strict TOML config value", () => {
-    const invocation = adapter.build(request("codex", { effort: "medium", model: "gpt-5.6" }));
+    const invocation = adapter.build(request("codex", { effort: "medium", model: "gpt-5.6-sol" }));
     expect(invocation.args).toContainAllValues([
-      "exec", "-C", process.cwd(), "-s", "read-only", "--ephemeral", "--model", "gpt-5.6",
+      "exec", "-C", process.cwd(), "-s", "read-only", "--ephemeral", "--model", "gpt-5.6-sol",
       "-c", 'model_reasoning_effort="medium"', "--json", "-",
     ]);
   });
@@ -154,8 +155,8 @@ describe("CursorAdapter", () => {
   const adapter = new CursorAdapter();
 
   test("defaults to a persistent, read-only plan session", () => {
-    const invocation = adapter.build(request("cursor", { model: "gpt-5.3-codex-low", access: "inspect" }));
-    for (const value of ["--print", "--model", "gpt-5.3-codex-low", "--output-format", "stream-json", "--mode", "plan"]) {
+    const invocation = adapter.build(request("cursor", { model: "cursor-grok-4.5-high", access: "inspect" }));
+    for (const value of ["--print", "--model", "cursor-grok-4.5-high", "--output-format", "stream-json", "--mode", "plan"]) {
       expect(invocation.args).toContain(value);
     }
     expect(invocation.args).not.toContain("--trust");
@@ -163,29 +164,29 @@ describe("CursorAdapter", () => {
 
   test("adds effort to a parameterized model without losing parameters", () => {
     const invocation = adapter.build(request("cursor", {
-      model: "claude-opus[context=1m,fast=false]",
+      model: "composer-2.5[context=1m]",
       effort: "high",
       access: "answer-only",
     }));
-    expect(invocation.args).toContain("claude-opus[context=1m,fast=false,effort=high]");
+    expect(invocation.args).toContain("composer-2.5[context=1m,effort=high]");
     expect(invocation.args).toContain("--mode");
     expect(invocation.args).toContain("ask");
   });
 
   test("does not corrupt an exact model ID that already encodes effort", () => {
-    const invocation = adapter.build(request("cursor", { model: "gpt-5.6-terra-low", effort: "low" }));
-    expect(invocation.args).toContain("gpt-5.6-terra-low");
-    expect(invocation.args).not.toContain("gpt-5.6-terra-low[effort=low]");
+    const invocation = adapter.build(request("cursor", { model: "cursor-grok-4.5-low", effort: "low" }));
+    expect(invocation.args).toContain("cursor-grok-4.5-low");
+    expect(invocation.args).not.toContain("cursor-grok-4.5-low[effort=low]");
   });
 
-  test("supports exact max-effort Cursor model IDs", () => {
-    const invocation = adapter.build(request("cursor", { model: "claude-opus-5-max", effort: "max" }));
-    expect(invocation.args).toContain("claude-opus-5-max");
+  test("supports exact Composer fast model IDs", () => {
+    const invocation = adapter.build(request("cursor", { model: "composer-2.5-fast" }));
+    expect(invocation.args).toContain("composer-2.5-fast");
   });
 
   test("workspace trust is explicit", () => {
     const invocation = adapter.build(request("cursor", {
-      model: "gpt-5.3-codex-low",
+      model: "cursor-grok-4.5-high",
       providerOptions: { cursor: { trustWorkspace: true } },
     }));
     expect(invocation.args).toContain("--trust");
@@ -193,7 +194,7 @@ describe("CursorAdapter", () => {
 
   test("requests Cursor sandbox only where the CLI supports it", () => {
     const invocation = adapter.build(request("cursor", {
-      model: "gpt-5.3-codex-low",
+      model: "cursor-grok-4.5-high",
       access: "edit-isolated",
     }));
     expect(invocation.args).toContain("--worktree");
@@ -210,8 +211,8 @@ describe("CursorAdapter", () => {
   });
 
   test("an explicitly named model always beats the default", async () => {
-    const prepared = await adapter.prepare(request("cursor", { model: "gpt-5.3-codex-low" }));
-    expect(prepared.model).toBe("gpt-5.3-codex-low");
+    const prepared = await adapter.prepare(request("cursor", { model: "cursor-grok-4.5-high" }));
+    expect(prepared.model).toBe("cursor-grok-4.5-high");
     expect(adapter.build(prepared).args).not.toContain(CURSOR_DEFAULT_MODEL);
   });
 
@@ -221,7 +222,7 @@ describe("CursorAdapter", () => {
 
   test("never emits a bare --worktree, because Cursor would then name it itself", async () => {
     const prepared = await adapter.prepare(
-      request("cursor", { model: "gpt-5", access: "edit-isolated" }),
+      request("cursor", { model: "cursor-grok-4.5-medium", access: "edit-isolated" }),
       { generateWorktreeName: () => "agent-headless-fixed-1" },
     );
     expect(prepared.providerOptions?.cursor?.worktreeName).toBe("agent-headless-fixed-1");
@@ -229,14 +230,14 @@ describe("CursorAdapter", () => {
     expect(args.slice(args.indexOf("--worktree"), args.indexOf("--worktree") + 2))
       .toEqual(["--worktree", "agent-headless-fixed-1"]);
 
-    const direct = adapter.build(request("cursor", { model: "gpt-5", access: "edit-isolated" })).args;
+    const direct = adapter.build(request("cursor", { model: "cursor-grok-4.5-medium", access: "edit-isolated" })).args;
     const name = direct[direct.indexOf("--worktree") + 1];
     expect(name).toMatch(/^agent-headless-[a-z0-9]+-[a-f0-9]{12}$/u);
   });
 
   test("an explicit worktree name is passed through untouched", async () => {
     const prepared = await adapter.prepare(request("cursor", {
-      model: "gpt-5",
+      model: "cursor-grok-4.5-medium",
       access: "edit-isolated",
       providerOptions: { cursor: { worktreeName: "task-018", worktreeBase: "main" } },
     }));
@@ -332,7 +333,7 @@ describe("CursorAdapter", () => {
       expect(cursorRepoSlug(nested)).toBeUndefined();
 
       const isolated = await adapter.prepare(
-        request("cursor", { model: "gpt-5", access: "edit-isolated", cwd: nested }),
+        request("cursor", { model: "cursor-grok-4.5-medium", access: "edit-isolated", cwd: nested }),
         { generateWorktreeName: () => "agent-headless-fixed-9" },
       );
       expect(cursorWorktreePath(isolated)).toBeUndefined();
@@ -343,7 +344,7 @@ describe("CursorAdapter", () => {
 
   test("a worktree path is derived only where one actually exists", async () => {
     const isolated = await adapter.prepare(
-      request("cursor", { model: "gpt-5", access: "edit-isolated" }),
+      request("cursor", { model: "cursor-grok-4.5-medium", access: "edit-isolated" }),
       { generateWorktreeName: () => "agent-headless-fixed-8" },
     );
     expect(cursorWorktreePath(isolated)).toBe(
@@ -361,8 +362,8 @@ describe("CursorAdapter", () => {
   });
 
   test("rejects ephemeral sessions and schemas", () => {
-    expect(() => adapter.build(request("cursor", { model: "gpt-5", session: { mode: "ephemeral" } }))).toThrow(AgentHeadlessError);
-    expect(() => adapter.build(request("cursor", { model: "gpt-5", schema: {} }))).toThrow(AgentHeadlessError);
+    expect(() => adapter.build(request("cursor", { model: "cursor-grok-4.5-medium", session: { mode: "ephemeral" } }))).toThrow(AgentHeadlessError);
+    expect(() => adapter.build(request("cursor", { model: "cursor-grok-4.5-medium", schema: {} }))).toThrow(AgentHeadlessError);
   });
 
   test("the memo key separates a deleted variable from an untouched one", () => {
@@ -385,14 +386,14 @@ describe("CursorAdapter", () => {
 
   test("parses Cursor JSONL", () => {
     const stdout = [
-      JSON.stringify({ type: "system", subtype: "init", session_id: "c1", model: "gpt-5" }),
+      JSON.stringify({ type: "system", subtype: "init", session_id: "c1", model: "cursor-grok-4.5-medium" }),
       JSON.stringify({ type: "assistant", subtype: "message", content: "OK" }),
       JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "OK", session_id: "c1", usage: { inputTokens: 6, outputTokens: 1, cacheReadTokens: 2 } }),
     ].join("\n");
     expect(adapter.parse(stdout, true)).toMatchObject({
       finalText: "OK",
       sessionId: "c1",
-      modelObserved: "gpt-5",
+      modelObserved: "cursor-grok-4.5-medium",
       usage: { inputTokens: 6, cachedInputTokens: 2, outputTokens: 1 },
     });
   });
@@ -440,7 +441,7 @@ describe("Cursor worktree derivation probes git under the request's environment"
 
   function isolated(env?: Record<string, string | undefined>): RunRequest {
     return request("cursor", {
-      model: "gpt-5",
+      model: "cursor-grok-4.5-medium",
       access: "edit-isolated",
       cwd: workdir,
       providerOptions: { cursor: { worktreeName: "agent-headless-fixed-env" } },
@@ -547,7 +548,7 @@ describe("tolerant JSONL parsing", () => {
   test("adapters surface skipped-line warnings without a protocol error", () => {
     const stdout = [
       "not-json banner",
-      JSON.stringify({ type: "system", subtype: "init", session_id: "c1", model: "gpt-5" }),
+      JSON.stringify({ type: "system", subtype: "init", session_id: "c1", model: "cursor-grok-4.5-medium" }),
       JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "OK", session_id: "c1" }),
     ].join("\n");
     const parsed = new CursorAdapter().parse(stdout, true);
@@ -715,52 +716,32 @@ describe("protocol validation", () => {
   });
 });
 
-describe("Cursor model listing memoization (real cache path)", () => {
-  // Exercises the module-level memo through a real child process, so a wrong
-  // cache key shows up as a missing or extra spawn rather than being hidden
-  // behind an injected `listModels` seam.
-  const directory = mkdtempSync(path.join(tmpdir(), "agent-headless-models-"));
-  const counter = path.join(directory, "calls.log");
-  const isWindows = process.platform === "win32";
-  const executable = path.join(directory, isWindows ? "fake-cursor.cmd" : "fake-cursor.sh");
-  writeFileSync(
-    executable,
-    isWindows
-      ? `@echo off\r\necho call>>"${counter}"\r\necho model-a - a model\r\n`
-      : `#!/bin/sh\necho call >> "${counter}"\necho "model-a - a model"\n`,
-  );
-  if (!isWindows) chmodSync(executable, 0o755);
-
-  function calls(): number {
-    if (!existsSync(counter)) return 0;
-    return readFileSync(counter, "utf8").split(/\r?\n/u).filter((line) => line.trim()).length;
-  }
-
-  afterAll(() => {
-    rmSync(directory, { recursive: true, force: true });
+describe("supported model lists", () => {
+  test("each provider exposes its curated allowlist", async () => {
+    expect(await new ClaudeAdapter().listModels()).toEqual([...SUPPORTED_MODELS.claude]);
+    expect(await new CodexAdapter().listModels()).toEqual([...SUPPORTED_MODELS.codex]);
+    expect(await new CursorAdapter().listModels()).toEqual([...SUPPORTED_MODELS.cursor]);
+    expect(SUPPORTED_MODELS.cursor.includes("cursor-grok-4.5-medium-fast" as never)).toBe(false);
   });
 
-  test("a deleted variable and an untouched one do not share a cached listing", async () => {
-    const adapter = new CursorAdapter();
-    expect(await adapter.listModels({ executable, env: { CURSOR_API_KEY: undefined } })).toEqual(["model-a"]);
-    expect(calls()).toBe(1);
-    // Repeating the identical request must be served from the memo.
-    await adapter.listModels({ executable, env: { CURSOR_API_KEY: undefined } });
-    expect(calls()).toBe(1);
-    // A different account context must not be: under the `JSON.stringify` key
-    // both of these collapse to `{}` and this stays at 1.
-    expect(await adapter.listModels({ executable, env: {} })).toEqual(["model-a"]);
-    expect(calls()).toBe(2);
-  }, 30_000);
+  test("Claude Fable defaults to low effort unless the caller sets one", async () => {
+    const adapter = new ClaudeAdapter();
+    const prepared = await adapter.prepare(request("claude", { model: "claude-fable-5" }));
+    expect(prepared.effort).toBe("low");
+    expectFlag(adapter.build(prepared).args, "--effort", "low");
 
-  test("two identical environments written in different orders share one cached listing", async () => {
-    const adapter = new CursorAdapter();
-    const before = calls();
-    await adapter.listModels({ executable, env: { CURSOR_API_KEY: "k", CURSOR_TEAM: "t" } });
-    expect(calls()).toBe(before + 1);
-    await adapter.listModels({ executable, env: { CURSOR_TEAM: "t", CURSOR_API_KEY: "k" } });
-    expect(calls()).toBe(before + 1);
-  }, 30_000);
+    const explicit = await adapter.prepare(request("claude", { model: "claude-fable-5", effort: "high" }));
+    expect(explicit.effort).toBe("high");
+  });
+
+  test("off-list and Grok-fast Cursor models fail closed", async () => {
+    await expect(new CursorAdapter().prepare(request("cursor", { model: "claude-opus-5-thinking-high" })))
+      .rejects.toThrow(/supported list/u);
+    await expect(new CursorAdapter().prepare(request("cursor", { model: "cursor-grok-4.5-high-fast" })))
+      .rejects.toThrow(/fast variants are not allowed/u);
+    await expect(new CodexAdapter().prepare(request("codex", { model: "gpt-5.5" })))
+      .rejects.toThrow(/supported list/u);
+  });
 });
 
 describe("memo keys under Windows case-insensitive resolution", () => {

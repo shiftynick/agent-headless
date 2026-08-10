@@ -10,7 +10,7 @@ test("the packaged library runs on Node and accepts a deterministic executor", a
       provider: "codex",
       prompt: "Say OK",
       cwd: process.cwd(),
-      model: "gpt-test",
+      model: "gpt-5.6-sol",
     },
     {
       execute: async (invocation) => {
@@ -69,7 +69,7 @@ test("the packaged library tolerates a banner line and always reports its worksp
       provider: "cursor",
       prompt: "do the work",
       cwd: process.cwd(),
-      model: "gpt-5.3-codex-low",
+      model: "cursor-grok-4.5-high",
       access: "edit-isolated",
       providerOptions: { cursor: { worktreeName: "task-018" } },
     },
@@ -113,8 +113,9 @@ test("the packaged library reports a post-result error as a failed run", async (
     ],
   };
   for (const [provider, lines] of Object.entries(streams)) {
+    const model = provider === "claude" ? "claude-opus-5" : "cursor-grok-4.5-medium";
     const result = await runAgent(
-      { provider, prompt: "Say OK", cwd: process.cwd(), model: "model-test" },
+      { provider, prompt: "Say OK", cwd: process.cwd(), model },
       {
         execute: async () => ({
           stdout: lines.join("\n"),

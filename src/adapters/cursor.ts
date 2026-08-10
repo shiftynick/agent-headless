@@ -4,12 +4,12 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { unsupported } from "../errors";
+import { assertSupportedModel, supportedModels } from "../models";
 import { asRecord, numberValue, parseJsonLines } from "../jsonl";
-import { effectiveEnv, foldEnvName, lastEnvMatch, probeExecutable, resolveCommand, runInvocation } from "../process";
+import { effectiveEnv, foldEnvName, lastEnvMatch, probeExecutable, resolveCommand } from "../process";
 import type {
   AgentUsage,
   Invocation,
-  ListModelsOptions,
   ParsedOutput,
   PrepareOptions,
   ProviderAdapter,
@@ -41,7 +41,7 @@ function cursorModel(model: string, effort: RunRequest["effort"]): string {
 /**
  * Model used when a Cursor request names none. Cursor has no usable server-side
  * default here (`auto` is deliberately refused), so the runner has to pick one.
- * Verified present in the live `models` list of `cursor-agent 2026.08.04-aaa8809`.
+ * Must stay on the supported Cursor list (`SUPPORTED_MODELS.cursor`).
  *
  * A run that falls back to this reports `modelDefaulted: true`. Callers whose
  * correctness depends on *who* chose the model - cold review, for instance,
@@ -293,28 +293,13 @@ export function cursorWorktreePath(
   return path.resolve(cwd, root, slug, name);
 }
 
-const modelPromises = new Map<string, Promise<string[]>>();
-
 /**
- * Cache key for a model listing, covering the whole environment it was made
- * under - two installations, or two accounts, can offer different models. The
- * environment is encoded by `envKeyPart`, which the repository-slug memo shares.
- *
- * Scope note: this deliberately keys only the *overrides*. A run whose
- * credentials come from inherited `process.env` shares a key with any other
- * such run, and a mid-process mutation of `process.env` will not invalidate the
- * cache. That is the pre-existing contract (the memo lives for the process
- * lifetime), and inherited-env mutation is not something a caller does between
- * two listings in practice.
+ * Cache-key helper retained for callers and tests that need the same environment
+ * encoding `cursorRepoSlug` uses. Model listing itself is a static supported
+ * list and no longer probes the Cursor CLI.
  */
 export function modelListingKey(executable: string, env?: Record<string, string | undefined>): string {
   return JSON.stringify([executable, envKeyPart(env)]);
-}
-
-function parseModels(stdout: string): string[] {
-  return stdout.split(/\r?\n/u)
-    .map((line) => line.match(/^([^\s]+)\s+-\s+/u)?.[1])
-    .filter((model): model is string => Boolean(model));
 }
 
 function modelWithEffort(model: string, effort: Exclude<RunRequest["effort"], undefined>): string {
@@ -345,45 +330,26 @@ export class CursorAdapter implements ProviderAdapter {
     };
   }
 
-  async listModels(options: ListModelsOptions = {}): Promise<string[]> {
-    const executable = options.executable ?? envExecutable(this.provider, options.env);
-    const key = modelListingKey(executable, options.env);
-    let modelsPromise = modelPromises.get(key);
-    if (!modelsPromise) {
-      modelsPromise = (async () => {
-        const result = await runInvocation(
-          { provider: this.provider, command: executable, args: ["models"], cwd: process.cwd(), stdin: "", structured: false },
-          { timeoutMs: 30_000, ...(options.env ? { env: options.env } : {}) },
-        );
-        if (result.exitCode !== 0) unsupported(`Cursor model listing failed: ${result.stderr.trim()}`);
-        return parseModels(result.stdout);
-      })();
-      modelPromises.set(key, modelsPromise);
-    }
-    return await modelsPromise;
+  async listModels(): Promise<string[]> {
+    return supportedModels("cursor");
   }
 
   async prepare(request: RunRequest, options: PrepareOptions = {}): Promise<RunRequest> {
-    // An operator-supplied model always wins; the default only fills a gap.
     const model = request.model ?? CURSOR_DEFAULT_MODEL;
-    const withModel: RunRequest = request.model === undefined ? { ...request, model } : request;
-    // Fix the worktree name here, so build and the workspace descriptor agree on it.
-    const defaulted = withDefaultWorktreeName(withModel, options.generateWorktreeName ?? generateWorktreeName);
-    if (!request.effort || model.includes("[")) return defaulted;
-    const models = await this.listModels({
-      executable: envExecutable(this.provider, request.env),
-      ...(request.env ? { env: request.env } : {}),
-    });
-    const candidate = modelWithEffort(model, request.effort);
-    const xhighCandidate = request.effort === "xhigh"
-      ? modelWithEffort(model, "high").replace(/-high(-fast)?$/u, "-extra-high$1")
-      : undefined;
-    const resolved = [candidate, xhighCandidate].find((value) => value && models.includes(value));
-    if (resolved) return { ...defaulted, model: resolved };
-    if (models.includes(model)) {
-      unsupported(`Cursor model ${model} has no available ${request.effort} effort variant; choose an exact model ID`);
+    if (model.toLowerCase() === "auto") unsupported("Cursor model=auto is not allowed; name an exact model");
+    let next: RunRequest = request.model === undefined ? { ...request, model } : { ...request };
+    const models = supportedModels("cursor");
+    if (request.effort && !model.includes("[")) {
+      const candidate = modelWithEffort(model, request.effort);
+      if (models.includes(candidate)) next = { ...next, model: candidate };
+      else if (models.includes(model)) {
+        unsupported(
+          `Cursor model ${model} has no supported ${request.effort} effort variant; choose an exact model ID`,
+        );
+      }
     }
-    return defaulted;
+    assertSupportedModel("cursor", next.model!);
+    return withDefaultWorktreeName(next, options.generateWorktreeName ?? generateWorktreeName);
   }
 
   build(request: RunRequest): Invocation {

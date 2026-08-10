@@ -9,7 +9,7 @@ const help = `agent-headless - one headless interface for Claude, Codex, and Cur
 Usage:
   agent-headless run --provider <claude|codex|cursor> --prompt <text> [options]
   agent-headless capabilities [provider]
-  agent-headless models cursor
+  agent-headless models <claude|codex|cursor>
   agent-headless --version
 
 Run options:

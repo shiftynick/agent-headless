@@ -83,13 +83,13 @@ const isolatedCursor: RunRequest = {
   provider: "cursor",
   prompt: "do the work",
   cwd: process.cwd(),
-  model: "gpt-5.3-codex-low",
+  model: "cursor-grok-4.5-high",
   access: "edit-isolated",
   providerOptions: { cursor: { worktreeName: "task-018", worktreeBase: "main" } },
 };
 
 const cursorSuccess = [
-  JSON.stringify({ type: "system", subtype: "init", session_id: "c1", model: "gpt-5", cwd: "/repo/.worktrees/task-018" }),
+  JSON.stringify({ type: "system", subtype: "init", session_id: "c1", model: "cursor-grok-4.5-medium", cwd: "/repo/.worktrees/task-018" }),
   JSON.stringify({ type: "assistant", subtype: "message", content: "working" }),
   JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "done", session_id: "c1" }),
 ].join("\n");
@@ -190,7 +190,7 @@ test("a clean exit with no terminal marker at all is still unparsed, not failed"
 
 test("a non-session event's differing cwd is not taken as the worktree", async () => {
   const stream = [
-    JSON.stringify({ type: "system", subtype: "init", session_id: "c1", model: "gpt-5", cwd: process.cwd() }),
+    JSON.stringify({ type: "system", subtype: "init", session_id: "c1", model: "cursor-grok-4.5-medium", cwd: process.cwd() }),
     JSON.stringify({ type: "tool_call", subtype: "started", cwd: "/repo/packages/api" }),
     JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "done", session_id: "c1" }),
   ].join("\n");
@@ -256,11 +256,11 @@ test("a Cursor run with no model uses the documented default and says that it di
 
 test("an explicit Cursor model overrides the default and is reported as chosen", async () => {
   const options = capturing(cursorSuccess);
-  const result = await runAgent({ ...bareCursor, model: "gpt-5.3-codex-low" }, options);
+  const result = await runAgent({ ...bareCursor, model: "cursor-grok-4.5-high" }, options);
 
-  expectFlag(options.args(), "--model", "gpt-5.3-codex-low");
+  expectFlag(options.args(), "--model", "cursor-grok-4.5-high");
   expect(options.args()).not.toContain(CURSOR_DEFAULT_MODEL);
-  expect(result.modelRequested).toBe("gpt-5.3-codex-low");
+  expect(result.modelRequested).toBe("cursor-grok-4.5-high");
   expect(result.modelDefaulted).toBeFalsy();
 });
 
@@ -282,16 +282,16 @@ test("Claude and Codex get no injected model default", async () => {
   }
 });
 
-test("a rejected default model is answered with the live model list", async () => {
+test("a rejected default model is answered with the supported model list", async () => {
   const result = await runAgent(bareCursor, {
     ...stubbed("", { exitCode: 1, stderr: "error: unknown model 'cursor-grok-4.5-medium'" }),
-    listModels: async () => ["gpt-5.3-codex-low", "cursor-grok-4.5-high-fast"],
+    listModels: async () => ["cursor-grok-4.5-high", "composer-2.5"],
   });
 
   expect(result.status).toBe("failed");
   expect(result.modelDefaulted).toBe(true);
   expect(result.warnings.some((warning) => warning.includes("run `agent-headless models cursor`"))).toBe(true);
-  expect(result.warnings.some((warning) => warning.includes("cursor-grok-4.5-high-fast"))).toBe(true);
+  expect(result.warnings.some((warning) => warning.includes("composer-2.5"))).toBe(true);
 });
 
 test("the rejected-default model listing is resolved against the run's own environment", async () => {
@@ -327,9 +327,9 @@ test("a caller who explicitly names the default model is not reported as default
 test("an explicitly chosen model that is rejected is not paid for with a model listing", async () => {
   let listed = 0;
   const result = await runAgent(
-    { ...bareCursor, model: "gpt-9-imaginary" },
+    { ...bareCursor, model: "cursor-grok-4.5-high" },
     {
-      ...stubbed("", { exitCode: 1, stderr: "error: model not found: gpt-9-imaginary" }),
+      ...stubbed("", { exitCode: 1, stderr: "error: model not found: cursor-grok-4.5-high" }),
       listModels: async () => {
         listed += 1;
         return [];
@@ -357,7 +357,7 @@ test("an ordinary failure triggers no model listing at all", async () => {
 test("an isolated Cursor run always names its worktree explicitly", async () => {
   const options = capturing(cursorSuccess);
   const result = await runAgent(
-    { ...bareCursor, model: "gpt-5", access: "edit-isolated" },
+    { ...bareCursor, model: "cursor-grok-4.5-medium", access: "edit-isolated" },
     { ...options, generateWorktreeName: () => "agent-headless-fixed-1" },
   );
 
@@ -370,7 +370,7 @@ test("an isolated Cursor run always names its worktree explicitly", async () => 
 test("an explicit worktree name is used and reported unchanged", async () => {
   const options = capturing(cursorSuccess);
   const result = await runAgent(
-    { ...bareCursor, model: "gpt-5", access: "edit-isolated", providerOptions: { cursor: { worktreeName: "task-018" } } },
+    { ...bareCursor, model: "cursor-grok-4.5-medium", access: "edit-isolated", providerOptions: { cursor: { worktreeName: "task-018" } } },
     { ...options, generateWorktreeName: () => "agent-headless-fixed-1" },
   );
 
@@ -380,7 +380,7 @@ test("an explicit worktree name is used and reported unchanged", async () => {
 });
 
 test("the generated worktree name survives a timeout and a non-zero exit", async () => {
-  const isolated: RunRequest = { ...bareCursor, model: "gpt-5", access: "edit-isolated" };
+  const isolated: RunRequest = { ...bareCursor, model: "cursor-grok-4.5-medium", access: "edit-isolated" };
   const generateWorktreeName = (): string => "agent-headless-fixed-2";
 
   const timedOut = await runAgent(isolated, {
@@ -396,7 +396,7 @@ test("the generated worktree name survives a timeout and a non-zero exit", async
 });
 
 test("concurrent isolated runs do not share a generated worktree name", async () => {
-  const isolated: RunRequest = { ...bareCursor, model: "gpt-5", access: "edit-isolated" };
+  const isolated: RunRequest = { ...bareCursor, model: "cursor-grok-4.5-medium", access: "edit-isolated" };
   const [first, second] = await Promise.all([
     runAgent(isolated, stubbed(cursorSuccess)),
     runAgent(isolated, stubbed(cursorSuccess)),
@@ -426,14 +426,14 @@ function cursorWorktreeLocation(cwd: string, name: string, root?: string): strin
 
 /** A readable, successful Cursor stream that discloses no worktree path at all. */
 const cursorSilentSuccess = [
-  JSON.stringify({ type: "system", subtype: "init", session_id: "c2", model: "gpt-5", cwd: process.cwd() }),
+  JSON.stringify({ type: "system", subtype: "init", session_id: "c2", model: "cursor-grok-4.5-medium", cwd: process.cwd() }),
   JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "done", session_id: "c2" }),
 ].join("\n");
 
 test("every isolated outcome reports the worktree path, readable stream or not", async () => {
   const name = "agent-headless-fixed-3";
   const expected = cursorWorktreeLocation(process.cwd(), name);
-  const isolated: RunRequest = { ...bareCursor, model: "gpt-5", access: "edit-isolated" };
+  const isolated: RunRequest = { ...bareCursor, model: "cursor-grok-4.5-medium", access: "edit-isolated" };
   const outcomes: Array<[RunStatus, RunAgentOptions]> = [
     ["succeeded", stubbed(cursorSilentSuccess)],
     ["unparsed", stubbed("banner one\nbanner two")],
@@ -453,7 +453,7 @@ test("every isolated outcome reports the worktree path, readable stream or not",
 
 test("the reported root and name compose to exactly the reported path", async () => {
   const result = await runAgent(
-    { ...bareCursor, model: "gpt-5", access: "edit-isolated" },
+    { ...bareCursor, model: "cursor-grok-4.5-medium", access: "edit-isolated" },
     { ...stubbed("banner one\nbanner two"), generateWorktreeName: () => "agent-headless-fixed-5" },
   );
   const { worktree, worktreeRoot, worktreeName } = result.workspace;
@@ -478,7 +478,7 @@ test("a worktree path the provider discloses beats the derived one", async () =>
 
 test("a disclosed path is reported only once it is absolute", async () => {
   const relative = [
-    JSON.stringify({ type: "system", subtype: "init", session_id: "c3", model: "gpt-5", cwd: process.cwd() }),
+    JSON.stringify({ type: "system", subtype: "init", session_id: "c3", model: "cursor-grok-4.5-medium", cwd: process.cwd() }),
     JSON.stringify({ type: "assistant", subtype: "message", worktree_path: "relative-worktree" }),
     JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "done", session_id: "c3" }),
   ].join("\n");
@@ -500,7 +500,7 @@ test("a disclosed path is reported only once it is absolute", async () => {
 
 test("an unusable disclosure falls back to the derived path rather than being reported", async () => {
   const result = await runAgent(
-    { ...bareCursor, model: "gpt-5", access: "edit-isolated" },
+    { ...bareCursor, model: "cursor-grok-4.5-medium", access: "edit-isolated" },
     {
       ...stubbed('preparing worktree {"worktree_path":"   "} ...\nstill not jsonl'),
       generateWorktreeName: () => "agent-headless-fixed-10",
@@ -518,7 +518,7 @@ test("a caller-supplied worktree name and base are honored, and the base stays a
   const result = await runAgent(
     {
       ...bareCursor,
-      model: "gpt-5",
+      model: "cursor-grok-4.5-medium",
       access: "edit-isolated",
       providerOptions: { cursor: { worktreeName: "task-018", worktreeBase: "release-2.1" } },
     },
@@ -539,7 +539,7 @@ test("a relocated CURSOR_WORKTREES_ROOT moves the reported path with it", async 
   const root = mkdtempSync(path.join(tmpdir(), "agent-headless-wt-root-"));
   try {
     const result = await runAgent(
-      { ...bareCursor, model: "gpt-5", access: "edit-isolated", env: { CURSOR_WORKTREES_ROOT: root } },
+      { ...bareCursor, model: "cursor-grok-4.5-medium", access: "edit-isolated", env: { CURSOR_WORKTREES_ROOT: root } },
       { ...stubbed("banner one\nbanner two"), generateWorktreeName: () => "agent-headless-fixed-7" },
     );
 
@@ -554,7 +554,7 @@ test("no path is invented for a worktree name Cursor would refuse", async () => 
   const result = await runAgent(
     {
       ...bareCursor,
-      model: "gpt-5",
+      model: "cursor-grok-4.5-medium",
       access: "edit-isolated",
       providerOptions: { cursor: { worktreeName: "feature/thing" } },
     },
@@ -570,7 +570,7 @@ test("no path is invented for a worktree name Cursor would refuse", async () => 
 });
 
 test("a non-isolated run reports no worktree of any kind", async () => {
-  const result = await runAgent({ ...bareCursor, model: "gpt-5", access: "inspect" }, stubbed(cursorSilentSuccess));
+  const result = await runAgent({ ...bareCursor, model: "cursor-grok-4.5-medium", access: "inspect" }, stubbed(cursorSilentSuccess));
 
   expect(result.workspace.access).toBe("inspect");
   expect(result.workspace.worktree).toBeUndefined();

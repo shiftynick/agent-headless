@@ -1,8 +1,17 @@
 import path from "node:path";
 import { unsupported } from "../errors";
 import { asRecord, numberValue, parseJsonLines } from "../jsonl";
+import { assertSupportedModel, supportedModels } from "../models";
 import { probeExecutable } from "../process";
-import type { AgentUsage, Invocation, ParsedOutput, ProviderAdapter, ProviderCapabilities, RunRequest } from "../types";
+import type {
+  AgentUsage,
+  Invocation,
+  ParsedOutput,
+  PrepareOptions,
+  ProviderAdapter,
+  ProviderCapabilities,
+  RunRequest,
+} from "../types";
 import {
   assertAccess,
   assertSession,
@@ -31,8 +40,17 @@ export class CodexAdapter implements ProviderAdapter {
       supportsModel: true,
       supportsEffort: true,
       supportsSchema: true,
-      supportsModelListing: false,
+      supportsModelListing: true,
     };
+  }
+
+  async listModels(): Promise<string[]> {
+    return supportedModels("codex");
+  }
+
+  async prepare(request: RunRequest, _options: PrepareOptions = {}): Promise<RunRequest> {
+    if (request.model) assertSupportedModel("codex", request.model);
+    return request;
   }
 
   build(request: RunRequest): Invocation {

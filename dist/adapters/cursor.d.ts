@@ -1,8 +1,8 @@
-import type { Invocation, ListModelsOptions, ParsedOutput, PrepareOptions, ProviderAdapter, ProviderCapabilities, RunRequest } from "../types";
+import type { Invocation, ParsedOutput, PrepareOptions, ProviderAdapter, ProviderCapabilities, RunRequest } from "../types";
 /**
  * Model used when a Cursor request names none. Cursor has no usable server-side
  * default here (`auto` is deliberately refused), so the runner has to pick one.
- * Verified present in the live `models` list of `cursor-agent 2026.08.04-aaa8809`.
+ * Must stay on the supported Cursor list (`SUPPORTED_MODELS.cursor`).
  *
  * A run that falls back to this reports `modelDefaulted: true`. Callers whose
  * correctness depends on *who* chose the model - cold review, for instance,
@@ -80,22 +80,15 @@ export declare function cursorRepoSlug(cwd: string, env?: Record<string, string 
  */
 export declare function cursorWorktreePath(request: RunRequest, cwd?: string, env?: Record<string, string | undefined> | undefined): string | undefined;
 /**
- * Cache key for a model listing, covering the whole environment it was made
- * under - two installations, or two accounts, can offer different models. The
- * environment is encoded by `envKeyPart`, which the repository-slug memo shares.
- *
- * Scope note: this deliberately keys only the *overrides*. A run whose
- * credentials come from inherited `process.env` shares a key with any other
- * such run, and a mid-process mutation of `process.env` will not invalidate the
- * cache. That is the pre-existing contract (the memo lives for the process
- * lifetime), and inherited-env mutation is not something a caller does between
- * two listings in practice.
+ * Cache-key helper retained for callers and tests that need the same environment
+ * encoding `cursorRepoSlug` uses. Model listing itself is a static supported
+ * list and no longer probes the Cursor CLI.
  */
 export declare function modelListingKey(executable: string, env?: Record<string, string | undefined>): string;
 export declare class CursorAdapter implements ProviderAdapter {
     readonly provider: "cursor";
     capabilities(executable?: string): Promise<ProviderCapabilities>;
-    listModels(options?: ListModelsOptions): Promise<string[]>;
+    listModels(): Promise<string[]>;
     prepare(request: RunRequest, options?: PrepareOptions): Promise<RunRequest>;
     build(request: RunRequest): Invocation;
     parse(stdout: string, structured: boolean): ParsedOutput;

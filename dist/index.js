@@ -75,6 +75,53 @@ function numberValue(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
+// src/models.ts
+var SUPPORTED_MODELS = Object.freeze({
+  claude: Object.freeze(["claude-fable-5", "claude-opus-5", "claude-sonnet-5"]),
+  codex: Object.freeze(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]),
+  cursor: Object.freeze([
+    "cursor-grok-4.5-low",
+    "cursor-grok-4.5-medium",
+    "cursor-grok-4.5-high",
+    "composer-2.5",
+    "composer-2.5-fast"
+  ])
+});
+var CLAUDE_MODEL_ALIASES = Object.freeze({
+  fable: "claude-fable-5",
+  opus: "claude-opus-5",
+  sonnet: "claude-sonnet-5"
+});
+function supportedModels(provider) {
+  return [...SUPPORTED_MODELS[provider]];
+}
+function normalizeClaudeModel(model) {
+  return CLAUDE_MODEL_ALIASES[model] ?? model;
+}
+function isClaudeFable(model) {
+  return normalizeClaudeModel(model) === "claude-fable-5";
+}
+function assertSupportedModel(provider, model) {
+  if (provider === "claude") {
+    if (!SUPPORTED_MODELS.claude.includes(normalizeClaudeModel(model))) {
+      unsupported(`Claude model "${model}" is not in the supported list; run \`agent-headless models claude\``);
+    }
+    return;
+  }
+  if (provider === "codex") {
+    if (!SUPPORTED_MODELS.codex.includes(model)) {
+      unsupported(`Codex model "${model}" is not in the supported list; run \`agent-headless models codex\``);
+    }
+    return;
+  }
+  if (/^cursor-grok-.*-fast$/u.test(model)) {
+    unsupported(`Cursor Grok fast variants are not allowed; use ${model.replace(/-fast$/u, "")}`);
+  }
+  if (!SUPPORTED_MODELS.cursor.includes(model)) {
+    unsupported(`Cursor model "${model}" is not in the supported list; run \`agent-headless models cursor\``);
+  }
+}
+
 // src/process.ts
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -338,8 +385,19 @@ class ClaudeAdapter {
       supportsModel: true,
       supportsEffort: true,
       supportsSchema: true,
-      supportsModelListing: false
+      supportsModelListing: true
     };
+  }
+  async listModels() {
+    return supportedModels("claude");
+  }
+  async prepare(request, _options = {}) {
+    if (request.model)
+      assertSupportedModel("claude", request.model);
+    if (request.model && isClaudeFable(request.model) && !request.effort) {
+      return { ...request, effort: "low" };
+    }
+    return request;
   }
   build(request) {
     assertAccess(request, ["answer-only", "inspect", "edit-workspace", "edit-isolated"]);
@@ -472,8 +530,16 @@ class CodexAdapter {
       supportsModel: true,
       supportsEffort: true,
       supportsSchema: true,
-      supportsModelListing: false
+      supportsModelListing: true
     };
+  }
+  async listModels() {
+    return supportedModels("codex");
+  }
+  async prepare(request, _options = {}) {
+    if (request.model)
+      assertSupportedModel("codex", request.model);
+    return request;
   }
   build(request) {
     assertAccess(request, ["answer-only", "inspect", "edit-workspace", "inherit-session"]);
@@ -703,13 +769,6 @@ function cursorWorktreePath(request, cwd = request.cwd, env = request.env) {
     return;
   return path3.resolve(cwd, root, slug, name);
 }
-var modelPromises = new Map;
-function modelListingKey(executable, env) {
-  return JSON.stringify([executable, envKeyPart(env)]);
-}
-function parseModels(stdout) {
-  return stdout.split(/\r?\n/u).map((line) => line.match(/^([^\s]+)\s+-\s+/u)?.[1]).filter((model) => Boolean(model));
-}
 function modelWithEffort(model, effort) {
   const fast = model.endsWith("-fast") ? "-fast" : "";
   const withoutFast = fast ? model.slice(0, -fast.length) : model;
@@ -736,40 +795,25 @@ class CursorAdapter {
       supportsModelListing: true
     };
   }
-  async listModels(options = {}) {
-    const executable = options.executable ?? envExecutable(this.provider, options.env);
-    const key = modelListingKey(executable, options.env);
-    let modelsPromise = modelPromises.get(key);
-    if (!modelsPromise) {
-      modelsPromise = (async () => {
-        const result = await runInvocation({ provider: this.provider, command: executable, args: ["models"], cwd: process.cwd(), stdin: "", structured: false }, { timeoutMs: 30000, ...options.env ? { env: options.env } : {} });
-        if (result.exitCode !== 0)
-          unsupported(`Cursor model listing failed: ${result.stderr.trim()}`);
-        return parseModels(result.stdout);
-      })();
-      modelPromises.set(key, modelsPromise);
-    }
-    return await modelsPromise;
+  async listModels() {
+    return supportedModels("cursor");
   }
   async prepare(request, options = {}) {
     const model = request.model ?? CURSOR_DEFAULT_MODEL;
-    const withModel = request.model === undefined ? { ...request, model } : request;
-    const defaulted = withDefaultWorktreeName(withModel, options.generateWorktreeName ?? generateWorktreeName);
-    if (!request.effort || model.includes("["))
-      return defaulted;
-    const models = await this.listModels({
-      executable: envExecutable(this.provider, request.env),
-      ...request.env ? { env: request.env } : {}
-    });
-    const candidate = modelWithEffort(model, request.effort);
-    const xhighCandidate = request.effort === "xhigh" ? modelWithEffort(model, "high").replace(/-high(-fast)?$/u, "-extra-high$1") : undefined;
-    const resolved = [candidate, xhighCandidate].find((value) => value && models.includes(value));
-    if (resolved)
-      return { ...defaulted, model: resolved };
-    if (models.includes(model)) {
-      unsupported(`Cursor model ${model} has no available ${request.effort} effort variant; choose an exact model ID`);
+    if (model.toLowerCase() === "auto")
+      unsupported("Cursor model=auto is not allowed; name an exact model");
+    let next = request.model === undefined ? { ...request, model } : { ...request };
+    const models = supportedModels("cursor");
+    if (request.effort && !model.includes("[")) {
+      const candidate = modelWithEffort(model, request.effort);
+      if (models.includes(candidate))
+        next = { ...next, model: candidate };
+      else if (models.includes(model)) {
+        unsupported(`Cursor model ${model} has no supported ${request.effort} effort variant; choose an exact model ID`);
+      }
     }
-    return defaulted;
+    assertSupportedModel("cursor", next.model);
+    return withDefaultWorktreeName(next, options.generateWorktreeName ?? generateWorktreeName);
   }
   build(request) {
     assertAccess(request, ["answer-only", "inspect", "edit-isolated"]);
@@ -983,7 +1027,7 @@ function describeWorkspace(request, cwd, events, stdout) {
   };
 }
 // src/version.ts
-var VERSION = "0.3.0";
+var VERSION = "0.4.0";
 
 // src/index.ts
 var MODEL_REJECTION = /(?:unknown|unrecognized|unsupported|invalid|unavailable)\s+model|no\s+such\s+model|model\b[^\n]{0,80}?(?:not\s+(?:found|available|supported|recognized)|does\s+not\s+exist|is\s+invalid|is\s+no\s+longer)/iu;
@@ -992,7 +1036,7 @@ async function modelRejectionWarnings(request, modelDefaulted, text, options) {
     return [];
   const origin = modelDefaulted ? `${CURSOR_DEFAULT_MODEL} is this runner's built-in default and may be stale` : "this model was requested explicitly";
   const warnings = [
-    `cursor rejected model "${request.model ?? "(none)"}" - ${origin}; run \`agent-headless models cursor\` for the live list`
+    `cursor rejected model "${request.model ?? "(none)"}" - ${origin}; run \`agent-headless models cursor\` for the supported list`
   ];
   if (!modelDefaulted)
     return warnings;
@@ -1125,6 +1169,7 @@ function assertSucceeded(result) {
 }
 export {
   unsupported,
+  supportedModels,
   runInvocation,
   runAgent,
   resolveOnWindows,
@@ -1144,6 +1189,7 @@ export {
   assertSucceeded,
   WORKTREE_NAME_PREFIX,
   VERSION,
+  SUPPORTED_MODELS,
   MAX_JSONL_WARNINGS,
   CursorAdapter,
   CodexAdapter,

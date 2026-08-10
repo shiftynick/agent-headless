@@ -34,6 +34,7 @@ export {
   getAdapter,
   WORKTREE_NAME_PREFIX,
 } from "./adapters";
+export { SUPPORTED_MODELS, supportedModels } from "./models";
 
 /** Shapes in which the Cursor CLI reports that it will not accept a model ID. */
 const MODEL_REJECTION =
@@ -56,7 +57,7 @@ async function modelRejectionWarnings(
     ? `${CURSOR_DEFAULT_MODEL} is this runner's built-in default and may be stale`
     : "this model was requested explicitly";
   const warnings = [
-    `cursor rejected model "${request.model ?? "(none)"}" - ${origin}; run \`agent-headless models cursor\` for the live list`,
+    `cursor rejected model "${request.model ?? "(none)"}" - ${origin}; run \`agent-headless models cursor\` for the supported list`,
   ];
   if (!modelDefaulted) return warnings;
   try {

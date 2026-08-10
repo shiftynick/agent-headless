@@ -29,7 +29,7 @@ Environment overrides are supported for nonstandard installs:
 
 ```powershell
 agent-headless capabilities
-agent-headless models cursor
+agent-headless models <claude|codex|cursor>
 
 agent-headless run `
   --provider codex `
@@ -113,7 +113,7 @@ deliberately picked to differ from the implementer's - must reject a result with
 
 If Cursor rejects the model, the result's `warnings` say so and point at
 `agent-headless models cursor`; when the rejected model was the default, the
-live model list is fetched once and included, since the caller never chose it.
+supported model list is included, since the caller never chose it.
 No model listing happens on any other path.
 
 ### Isolated worktrees are always located

@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.0
+
+- `models <claude|codex|cursor>` prints a curated supported-model list instead of
+  probing Cursor's live catalog (Claude and Codex previously had no listing).
+- Off-list `--model` values fail before the provider launches. Supported IDs:
+  Claude `claude-fable-5` / `claude-opus-5` / `claude-sonnet-5` (aliases
+  `fable` / `opus` / `sonnet`); Codex `gpt-5.6-sol` / `gpt-5.6-terra` /
+  `gpt-5.6-luna`; Cursor Grok `cursor-grok-4.5-low|medium|high` plus
+  `composer-2.5` and `composer-2.5-fast`. Cursor Grok `*-fast` variants are
+  refused. Default Cursor model remains `cursor-grok-4.5-medium`.
+- Claude Fable defaults `--effort low` when the caller names Fable and omits
+  effort.
+- Exported `SUPPORTED_MODELS` / `supportedModels` for callers that need the
+  same lists.
+
 ## 0.3.0
 
 - JSONL parsing is tolerant: an unparseable line is skipped and reported as a
