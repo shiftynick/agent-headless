@@ -2,6 +2,17 @@ import type { AgentEvent, AgentEventKind, Provider } from "./types";
 
 function eventKind(provider: Provider, type: string, raw: Record<string, unknown>): AgentEventKind {
   const lower = type.toLowerCase();
+  if (provider === "antigravity") {
+    if (lower === "init") return "session";
+    if (lower === "result") return "result";
+    if (lower === "step_update") {
+      const step = asRecord(raw.step_update);
+      if (step?.step_type === "agent_response") return "message";
+      if (typeof step?.step_type === "string" && step.step_type.includes("tool")) return "tool";
+      return "status";
+    }
+    if (lower === "command_result") return "status";
+  }
   if (lower.includes("error") || raw.is_error === true) return "error";
   if (lower.startsWith("result") || lower === "turn.completed") return "result";
   if (lower === "thread.started" || lower === "system.init") return "session";
@@ -55,7 +66,11 @@ export function parseJsonLines(provider: Provider, stdout: string): JsonLinesRes
 
 export function parseJsonEvent(provider: Provider, line: string): AgentEvent {
   const raw = JSON.parse(line) as Record<string, unknown>;
-  const rawType = typeof raw.type === "string" ? raw.type : "unknown";
+  const rawType = typeof raw.type === "string"
+    ? raw.type
+    : provider === "antigravity" && typeof raw.event === "string"
+      ? raw.event
+      : "unknown";
   const subtype = typeof raw.subtype === "string" ? `.${raw.subtype}` : "";
   const type = `${rawType}${subtype}`;
   return { provider, type, kind: eventKind(provider, type, raw), raw };

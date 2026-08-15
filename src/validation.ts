@@ -31,7 +31,11 @@ export function normalizeRequest(request: RunRequest): RunRequest {
         : "answer-only"
     ),
     output: request.output ?? "events",
-    session: request.session ?? (request.provider === "cursor" ? { mode: "persistent" } : { mode: "ephemeral" }),
+    session: request.session ?? (
+      request.provider === "cursor" || request.provider === "antigravity"
+        ? { mode: "persistent" }
+        : { mode: "ephemeral" }
+    ),
     timeoutMs: request.timeoutMs ?? 20 * 60_000,
     ...(additionalDirs ? { additionalDirs } : {}),
   };

@@ -50,3 +50,18 @@ live("Cursor headless adapter completes a structured answer-only run", async () 
   expect(result.finalText).toContain("CURSOR_HEADLESS_OK");
   expect(result.sessionId).toBeTruthy();
 });
+
+live("Antigravity headless adapter completes a structured answer-only run", async () => {
+  const result = await runAgent({
+    provider: "antigravity",
+    prompt: "Return exactly ANTIGRAVITY_HEADLESS_OK and nothing else. Do not use tools.",
+    cwd,
+    ...(process.env.AGENT_HEADLESS_ANTIGRAVITY_MODEL ? { model: process.env.AGENT_HEADLESS_ANTIGRAVITY_MODEL } : {}),
+    effort: "low",
+    access: "answer-only",
+    timeoutMs: 180_000,
+  });
+  expect(result.status).toBe("succeeded");
+  expect(result.finalText).toContain("ANTIGRAVITY_HEADLESS_OK");
+  expect(result.sessionId).toBeTruthy();
+});

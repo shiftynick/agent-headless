@@ -58,8 +58,14 @@ export function providerFailureMessage(label: string, event: AgentEvent): string
 }
 
 export function envExecutable(provider: Provider, requestEnv?: Record<string, string | undefined>): string {
-  const key = provider === "claude" ? "CLAUDE_BIN" : provider === "codex" ? "CODEX_BIN" : "CURSOR_AGENT_BIN";
-  const fallback = provider === "cursor" ? "agent" : provider;
+  const key = provider === "claude"
+    ? "CLAUDE_BIN"
+    : provider === "codex"
+      ? "CODEX_BIN"
+      : provider === "cursor"
+        ? "CURSOR_AGENT_BIN"
+        : "AGY_BIN";
+  const fallback = provider === "cursor" ? "agent" : provider === "antigravity" ? "agy" : provider;
   // requestEnv is a plain object, so a case-sensitive read would ignore a
   // differently cased override that the child environment will honour.
   return (requestEnv ? envValue(requestEnv, key) : undefined) || process.env[key] || fallback;

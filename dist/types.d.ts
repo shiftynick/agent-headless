@@ -1,4 +1,4 @@
-export type Provider = "claude" | "codex" | "cursor";
+export type Provider = "claude" | "codex" | "cursor" | "antigravity";
 export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
 export type AccessMode = "answer-only" | "inspect" | "edit-workspace" | "edit-isolated" | "inherit-session";
 export type OutputMode = "text" | "events";
@@ -52,6 +52,14 @@ export interface RunRequest {
             worktreeBase?: string;
             streamPartialOutput?: boolean;
             trustWorkspace?: boolean;
+        };
+        antigravity?: {
+            /** Run AGY terminal commands inside its native sandbox. */
+            sandbox?: boolean;
+            /** Name of an installed AGY custom agent to use for this run. */
+            agent?: string;
+            /** Existing AGY project ID to associate with this conversation. */
+            project?: string;
         };
     };
 }

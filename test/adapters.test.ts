@@ -6,6 +6,7 @@ import { effectiveEnv, envValue, resolveCommand } from "../src/process";
 import { envExecutable } from "../src/adapters/shared";
 import path from "node:path";
 import {
+  AntigravityAdapter,
   ClaudeAdapter,
   CodexAdapter,
   CURSOR_DEFAULT_MODEL,
@@ -148,6 +149,70 @@ describe("CodexAdapter", () => {
         { kind: "result" },
       ],
     });
+  });
+});
+
+describe("AntigravityAdapter", () => {
+  const adapter = new AntigravityAdapter();
+
+  test("builds a structured, read-first print run", () => {
+    const invocation = adapter.build(request("antigravity", {
+      model: "gemini-3.7-flash-high",
+      effort: "high",
+      access: "inspect",
+      schema: { type: "object" },
+      additionalDirs: [process.cwd()],
+      providerOptions: { antigravity: { sandbox: true, agent: "reviewer", project: "p1" } },
+      timeoutMs: 12_345,
+    }));
+    expect(invocation.command).toBe(process.env.AGY_BIN ?? "agy");
+    expect(invocation.args).toEqual([
+      "--print", "Say OK", "--output-format", "stream-json", "--print-timeout", "12345ms",
+      "--mode", "plan", "--model", "gemini-3.7-flash-high", "--effort", "high",
+      "--json-schema", '{"type":"object"}', "--add-dir", process.cwd(), "--sandbox",
+      "--agent", "reviewer", "--project", "p1",
+    ]);
+    expect(invocation.stdin).toBe("");
+  });
+
+  test("maps explicit workspace edits and conversation resume", () => {
+    const edit = adapter.build(request("antigravity", { access: "edit-workspace" }));
+    expectFlag(edit.args, "--mode", "accept-edits");
+    const resumed = adapter.build(request("antigravity", {
+      session: { mode: "resume", id: "conversation-1" },
+    }));
+    expectFlag(resumed.args, "--conversation", "conversation-1");
+  });
+
+  test("rejects impossible isolation, ephemeral sessions, budgets, and unsupported effort", () => {
+    expect(() => adapter.build(request("antigravity", { access: "edit-isolated" }))).toThrow(AgentHeadlessError);
+    expect(() => adapter.build(request("antigravity", { session: { mode: "ephemeral" } }))).toThrow(AgentHeadlessError);
+    expect(() => adapter.build(request("antigravity", { maxBudgetUsd: 1 }))).toThrow(AgentHeadlessError);
+    expect(() => adapter.build(request("antigravity", { effort: "max" }))).toThrow(AgentHeadlessError);
+  });
+
+  test("parses AGY stream events, terminal response, session, model, and usage", () => {
+    const stdout = [
+      JSON.stringify({ event: "init", conversation_id: "a1", init: { model: "gemini-3.7-flash-high" } }),
+      JSON.stringify({ event: "step_update", step_update: { step_type: "agent_response", text_delta: "OK" } }),
+      JSON.stringify({ event: "result", result: {
+        conversation_id: "a1", status: "SUCCESS", response: "OK",
+        usage: { input_tokens: 5, cache_read_tokens: 2, output_tokens: 1, thinking_tokens: 3 },
+      } }),
+    ].join("\n");
+    expect(adapter.parse(stdout, true)).toMatchObject({
+      finalText: "OK",
+      sessionId: "a1",
+      modelObserved: "gemini-3.7-flash-high",
+      usage: { inputTokens: 5, cachedInputTokens: 2, outputTokens: 1, reasoningOutputTokens: 3 },
+      events: [{ kind: "session" }, { kind: "message" }, { kind: "result" }],
+    });
+  });
+
+  test("treats an AGY non-success terminal result as a provider failure", () => {
+    const parsed = adapter.parse(JSON.stringify({ event: "result", result: { status: "FAILED", response: "quota exhausted" } }), true);
+    expect(parsed.unreadable).toBeUndefined();
+    expect(parsed.protocolError).toBe("Antigravity reported FAILED: quota exhausted");
   });
 });
 

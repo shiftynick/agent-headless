@@ -20,6 +20,22 @@ import { readFileSync } from "node:fs";
 // src/jsonl.ts
 function eventKind(provider, type, raw) {
   const lower = type.toLowerCase();
+  if (provider === "antigravity") {
+    if (lower === "init")
+      return "session";
+    if (lower === "result")
+      return "result";
+    if (lower === "step_update") {
+      const step = asRecord(raw.step_update);
+      if (step?.step_type === "agent_response")
+        return "message";
+      if (typeof step?.step_type === "string" && step.step_type.includes("tool"))
+        return "tool";
+      return "status";
+    }
+    if (lower === "command_result")
+      return "status";
+  }
   if (lower.includes("error") || raw.is_error === true)
     return "error";
   if (lower.startsWith("result") || lower === "turn.completed")
@@ -63,7 +79,7 @@ function parseJsonLines(provider, stdout) {
 }
 function parseJsonEvent(provider, line) {
   const raw = JSON.parse(line);
-  const rawType = typeof raw.type === "string" ? raw.type : "unknown";
+  const rawType = typeof raw.type === "string" ? raw.type : provider === "antigravity" && typeof raw.event === "string" ? raw.event : "unknown";
   const subtype = typeof raw.subtype === "string" ? `.${raw.subtype}` : "";
   const type = `${rawType}${subtype}`;
   return { provider, type, kind: eventKind(provider, type, raw), raw };
@@ -85,7 +101,8 @@ var SUPPORTED_MODELS = Object.freeze({
     "cursor-grok-4.5-high",
     "composer-2.5",
     "composer-2.5-fast"
-  ])
+  ]),
+  antigravity: Object.freeze([])
 });
 var CLAUDE_MODEL_ALIASES = Object.freeze({
   fable: "claude-fable-5",
@@ -113,6 +130,9 @@ function assertSupportedModel(provider, model) {
       unsupported(`Codex model "${model}" is not in the supported list; run \`agent-headless models codex\``);
     }
     return;
+  }
+  if (provider === "antigravity") {
+    unsupported("Antigravity models are resolved from the authenticated AGY CLI; run `agent-headless models antigravity`");
   }
   if (/^cursor-grok-.*-fast$/u.test(model)) {
     unsupported(`Cursor Grok fast variants are not allowed; use ${model.replace(/-fast$/u, "")}`);
@@ -350,8 +370,8 @@ function providerFailureMessage(label, event) {
   return `${label} reported ${event.type}${typeof detail === "string" ? `: ${detail.trim()}` : ""}`;
 }
 function envExecutable(provider, requestEnv) {
-  const key = provider === "claude" ? "CLAUDE_BIN" : provider === "codex" ? "CODEX_BIN" : "CURSOR_AGENT_BIN";
-  const fallback = provider === "cursor" ? "agent" : provider;
+  const key = provider === "claude" ? "CLAUDE_BIN" : provider === "codex" ? "CODEX_BIN" : provider === "cursor" ? "CURSOR_AGENT_BIN" : "AGY_BIN";
+  const fallback = provider === "cursor" ? "agent" : provider === "antigravity" ? "agy" : provider;
   return (requestEnv ? envValue(requestEnv, key) : undefined) || process.env[key] || fallback;
 }
 function assertAccess(request, allowed) {
@@ -366,6 +386,12 @@ function assertSession(request, allowed) {
 }
 function textOutput(provider, stdout) {
   return { finalText: stdout.replace(/\r?\n$/u, ""), events: [{ provider, type: "result", kind: "result", raw: stdout }] };
+}
+function providerFailure(provider, exitCode, stderr) {
+  const detail = stderr.trim().split(/\r?\n/u).slice(-6).join(`
+`);
+  return new AgentHeadlessError("provider_failed", `${provider} failed with exit code ${String(exitCode)}${detail ? `:
+${detail}` : ""}`);
 }
 
 // src/adapters/claude.ts
@@ -902,11 +928,161 @@ class CursorAdapter {
   }
 }
 
+// src/adapters/antigravity.ts
+var AGY_MODEL_LINE = /^([^\t\s]+)\t/u;
+function usageFrom(raw) {
+  const usage = {};
+  const inputTokens = numberValue(raw?.input_tokens);
+  const cachedInputTokens = numberValue(raw?.cache_read_tokens);
+  const outputTokens = numberValue(raw?.output_tokens);
+  const reasoningOutputTokens = numberValue(raw?.thinking_tokens);
+  if (inputTokens !== undefined)
+    usage.inputTokens = inputTokens;
+  if (cachedInputTokens !== undefined)
+    usage.cachedInputTokens = cachedInputTokens;
+  if (outputTokens !== undefined)
+    usage.outputTokens = outputTokens;
+  if (reasoningOutputTokens !== undefined)
+    usage.reasoningOutputTokens = reasoningOutputTokens;
+  return Object.keys(usage).length ? usage : undefined;
+}
+function resultRecord(event) {
+  return asRecord(asRecord(event?.raw)?.result);
+}
+function reportedFailure(result) {
+  const status = typeof result.status === "string" ? result.status : "failure";
+  const response = typeof result.response === "string" && result.response.trim() ? `: ${result.response.trim()}` : "";
+  return `Antigravity reported ${status}${response}`;
+}
+
+class AntigravityAdapter {
+  provider = "antigravity";
+  async capabilities(executable = envExecutable(this.provider)) {
+    const probe = await probeExecutable(this.provider, executable, process.cwd());
+    return {
+      provider: this.provider,
+      executable: probe.executable,
+      availability: probe.availability,
+      ...probe.version ? { version: probe.version } : {},
+      ...probe.reason ? { availabilityReason: probe.reason } : {},
+      access: ["answer-only", "inspect", "edit-workspace"],
+      sessions: ["persistent", "resume"],
+      supportsModel: true,
+      supportsEffort: true,
+      supportsSchema: true,
+      supportsModelListing: true
+    };
+  }
+  async listModels(options = {}) {
+    const command = options.executable ?? envExecutable(this.provider, options.env);
+    const result = await runInvocation({ provider: this.provider, command, args: ["models"], cwd: process.cwd(), stdin: "", structured: false }, { timeoutMs: 20000, ...options.env ? { env: options.env } : {} });
+    if (result.exitCode !== 0)
+      throw providerFailure(this.provider, result.exitCode, result.stderr);
+    return [...new Set(result.stdout.split(/\r?\n/u).map((line) => line.match(AGY_MODEL_LINE)?.[1]).filter((model) => model !== undefined))];
+  }
+  build(request) {
+    assertAccess(request, ["answer-only", "inspect", "edit-workspace"]);
+    assertSession(request, ["persistent", "resume"]);
+    if (request.maxBudgetUsd !== undefined)
+      unsupported("Antigravity does not expose a per-run budget flag");
+    if (request.effort === "xhigh" || request.effort === "max") {
+      unsupported("Antigravity effort supports low, medium, or high");
+    }
+    const session = request.session;
+    if (session.mode === "persistent" && session.id) {
+      unsupported("Antigravity cannot select a conversation ID when starting a persistent session");
+    }
+    const options = request.providerOptions?.antigravity;
+    const args = ["--print", request.prompt, "--output-format", request.output === "events" ? "stream-json" : "text"];
+    args.push("--print-timeout", `${request.timeoutMs}ms`);
+    if (request.access === "edit-workspace")
+      args.push("--mode", "accept-edits");
+    else
+      args.push("--mode", "plan");
+    if (session.mode === "resume")
+      args.push("--conversation", session.id);
+    if (request.model)
+      args.push("--model", request.model);
+    if (request.effort)
+      args.push("--effort", request.effort);
+    if (request.schema !== undefined) {
+      args.push("--json-schema", typeof request.schema === "string" ? request.schema : JSON.stringify(request.schema));
+    }
+    for (const directory of request.additionalDirs ?? [])
+      args.push("--add-dir", directory);
+    if (options?.sandbox)
+      args.push("--sandbox");
+    if (options?.agent)
+      args.push("--agent", options.agent);
+    if (options?.project)
+      args.push("--project", options.project);
+    return {
+      provider: this.provider,
+      command: envExecutable(this.provider, request.env),
+      args,
+      cwd: request.cwd,
+      stdin: "",
+      structured: request.output === "events"
+    };
+  }
+  parse(stdout, structured) {
+    if (!structured)
+      return textOutput(this.provider, stdout);
+    const parsed = parseJsonLines(this.provider, stdout);
+    const warnings = parsed.warnings.length ? { warnings: parsed.warnings } : {};
+    if (parsed.error)
+      return { events: parsed.events, protocolError: parsed.error, unreadable: true, ...warnings };
+    let terminal;
+    let terminalFailure;
+    for (let index = parsed.events.length - 1;index >= 0; index -= 1) {
+      const event = parsed.events[index];
+      if (event.kind === "error") {
+        terminalFailure = event;
+        break;
+      }
+      if (event.type === "result") {
+        terminal = event;
+        break;
+      }
+    }
+    if (terminalFailure) {
+      const raw = asRecord(terminalFailure.raw);
+      const message = typeof raw?.message === "string" ? `: ${raw.message}` : "";
+      return { events: parsed.events, protocolError: `Antigravity reported ${terminalFailure.type}${message}`, ...warnings };
+    }
+    const result = resultRecord(terminal);
+    if (!result) {
+      return {
+        events: parsed.events,
+        protocolError: "Antigravity stream did not contain a terminal result",
+        unreadable: true,
+        ...warnings
+      };
+    }
+    if (result.status !== "SUCCESS") {
+      return { events: parsed.events, protocolError: reportedFailure(result), ...warnings };
+    }
+    const init = asRecord(parsed.events.find((event) => event.type === "init")?.raw);
+    const initDetails = asRecord(init?.init);
+    const conversationId = result.conversation_id ?? init?.conversation_id;
+    const usage = usageFrom(asRecord(result.usage));
+    return {
+      events: parsed.events,
+      ...typeof result.response === "string" ? { finalText: result.response } : {},
+      ...typeof conversationId === "string" && conversationId ? { sessionId: conversationId } : {},
+      ...typeof initDetails?.model === "string" ? { modelObserved: initDetails.model } : {},
+      ...usage ? { usage } : {},
+      ...warnings
+    };
+  }
+}
+
 // src/adapters/index.ts
 var adapters = {
   claude: new ClaudeAdapter,
   codex: new CodexAdapter,
-  cursor: new CursorAdapter
+  cursor: new CursorAdapter,
+  antigravity: new AntigravityAdapter
 };
 function getAdapter(provider) {
   const adapter = adapters[provider];
@@ -944,7 +1120,7 @@ function normalizeRequest(request) {
     cwd: realpathSync(request.cwd),
     access: request.access ?? (request.provider === "codex" && request.session?.mode === "resume" ? "inherit-session" : "answer-only"),
     output: request.output ?? "events",
-    session: request.session ?? (request.provider === "cursor" ? { mode: "persistent" } : { mode: "ephemeral" }),
+    session: request.session ?? (request.provider === "cursor" || request.provider === "antigravity" ? { mode: "persistent" } : { mode: "ephemeral" }),
     timeoutMs: request.timeoutMs ?? 20 * 60000,
     ...additionalDirs ? { additionalDirs } : {}
   };
@@ -1027,7 +1203,7 @@ function describeWorkspace(request, cwd, events, stdout) {
   };
 }
 // src/version.ts
-var VERSION = "0.4.0";
+var VERSION = "0.5.0";
 
 // src/index.ts
 var MODEL_REJECTION = /(?:unknown|unrecognized|unsupported|invalid|unavailable)\s+model|no\s+such\s+model|model\b[^\n]{0,80}?(?:not\s+(?:found|available|supported|recognized)|does\s+not\s+exist|is\s+invalid|is\s+no\s+longer)/iu;
@@ -1153,7 +1329,7 @@ async function getCapabilities(provider) {
   return await getAdapter(provider).capabilities();
 }
 async function getAllCapabilities() {
-  return await Promise.all(["claude", "codex", "cursor"].map(getCapabilities));
+  return await Promise.all(["claude", "codex", "cursor", "antigravity"].map(getCapabilities));
 }
 async function listModels(provider, options = {}) {
   const adapter = getAdapter(provider);
@@ -1197,5 +1373,6 @@ export {
   CURSOR_WORKTREE_NAME_PATTERN,
   CURSOR_WORKTREES_ROOT_ENV,
   CURSOR_DEFAULT_MODEL,
+  AntigravityAdapter,
   AgentHeadlessError
 };

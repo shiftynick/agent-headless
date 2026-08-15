@@ -3,11 +3,13 @@ import { AgentHeadlessError } from "../errors";
 import { ClaudeAdapter } from "./claude";
 import { CodexAdapter } from "./codex";
 import { CursorAdapter } from "./cursor";
+import { AntigravityAdapter } from "./antigravity";
 
 const adapters: Record<Provider, ProviderAdapter> = {
   claude: new ClaudeAdapter(),
   codex: new CodexAdapter(),
   cursor: new CursorAdapter(),
+  antigravity: new AntigravityAdapter(),
 };
 
 export function getAdapter(provider: Provider): ProviderAdapter {
@@ -16,7 +18,7 @@ export function getAdapter(provider: Provider): ProviderAdapter {
   return adapter;
 }
 
-export { ClaudeAdapter, CodexAdapter, CursorAdapter };
+export { AntigravityAdapter, ClaudeAdapter, CodexAdapter, CursorAdapter };
 export {
   CURSOR_DEFAULT_MODEL,
   CURSOR_WORKTREE_NAME_PATTERN,
