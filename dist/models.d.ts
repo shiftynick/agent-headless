@@ -8,6 +8,7 @@ export declare const SUPPORTED_MODELS: Readonly<{
     readonly claude: readonly string[];
     readonly codex: readonly string[];
     readonly cursor: readonly string[];
+    readonly antigravity: readonly never[];
 }>;
 export declare function supportedModels(provider: Provider): string[];
 export declare function normalizeClaudeModel(model: string): string;

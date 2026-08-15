@@ -4,12 +4,12 @@ import process from "node:process";
 import { AgentHeadlessError, getAllCapabilities, getCapabilities, listModels, runAgent, VERSION } from "./index";
 import type { AccessMode, Effort, OutputMode, Provider, RunRequest, SessionMode } from "./types";
 
-const help = `agent-headless - one headless interface for Claude, Codex, and Cursor
+const help = `agent-headless - one headless interface for Claude, Codex, Cursor, and Antigravity
 
 Usage:
-  agent-headless run --provider <claude|codex|cursor> --prompt <text> [options]
+  agent-headless run --provider <claude|codex|cursor|antigravity> --prompt <text> [options]
   agent-headless capabilities [provider]
-  agent-headless models <claude|codex|cursor>
+  agent-headless models <claude|codex|cursor|antigravity>
   agent-headless --version
 
 Run options:
@@ -24,7 +24,7 @@ Run options:
   --session <mode>                ephemeral or persistent; use --resume for continuation
   --resume <id>                   Resume a provider session
   --output <mode>                 text or events (default: events)
-  --schema <path>                 JSON Schema path (Claude or Codex)
+  --schema <path>                 JSON Schema path (Claude, Codex, or Antigravity)
   --max-budget-usd <number>       Claude-only spending ceiling
   --timeout-ms <number>           Timeout in milliseconds
   --add-dir <path>                Additional directory; repeatable
@@ -82,8 +82,8 @@ function parseRun(args: string[]): { request: RunRequest; json: boolean } {
     if (flag === "--add-dir") { additionalDirs.push(take(args, index, flag)); index++; continue; }
     throw new AgentHeadlessError("invalid_request", `unknown option: ${flag}`);
   }
-  if (!provider || !["claude", "codex", "cursor"].includes(provider)) {
-    throw new AgentHeadlessError("invalid_request", "--provider must be claude, codex, or cursor");
+  if (!provider || !["claude", "codex", "cursor", "antigravity"].includes(provider)) {
+    throw new AgentHeadlessError("invalid_request", "--provider must be claude, codex, cursor, or antigravity");
   }
   if (prompt && promptFile) throw new AgentHeadlessError("invalid_request", "--prompt and --prompt-file are mutually exclusive");
   if (promptFile) prompt = readFileSync(promptFile, "utf8");
@@ -128,16 +128,16 @@ async function main(): Promise<void> {
   }
   if (command === "capabilities") {
     const provider = args[0] as Provider | undefined;
-    if (provider && !["claude", "codex", "cursor"].includes(provider)) {
-      throw new AgentHeadlessError("invalid_request", "capabilities provider must be claude, codex, or cursor");
+    if (provider && !["claude", "codex", "cursor", "antigravity"].includes(provider)) {
+      throw new AgentHeadlessError("invalid_request", "capabilities provider must be claude, codex, cursor, or antigravity");
     }
     console.log(JSON.stringify(provider ? await getCapabilities(provider) : await getAllCapabilities(), null, 2));
     return;
   }
   if (command === "models") {
     const provider = args[0] as Provider | undefined;
-    if (!provider || !["claude", "codex", "cursor"].includes(provider)) {
-      throw new AgentHeadlessError("invalid_request", "models provider must be claude, codex, or cursor");
+    if (!provider || !["claude", "codex", "cursor", "antigravity"].includes(provider)) {
+      throw new AgentHeadlessError("invalid_request", "models provider must be claude, codex, cursor, or antigravity");
     }
     console.log((await listModels(provider)).join("\n"));
     return;

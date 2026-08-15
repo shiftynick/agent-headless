@@ -16,6 +16,10 @@ export const SUPPORTED_MODELS = Object.freeze({
     "composer-2.5",
     "composer-2.5-fast",
   ]),
+  // Antigravity's authenticated catalog is intentionally read live through
+  // `agy models`; pinning it here would make this runner reject valid models
+  // whenever the CLI's catalog changes.
+  antigravity: Object.freeze([]),
 } as const);
 
 const CLAUDE_MODEL_ALIASES = Object.freeze({
@@ -52,6 +56,9 @@ export function assertSupportedModel(provider: Provider, model: string): void {
       );
     }
     return;
+  }
+  if (provider === "antigravity") {
+    unsupported("Antigravity models are resolved from the authenticated AGY CLI; run `agent-headless models antigravity`");
   }
   if (/^cursor-grok-.*-fast$/u.test(model)) {
     unsupported(`Cursor Grok fast variants are not allowed; use ${model.replace(/-fast$/u, "")}`);

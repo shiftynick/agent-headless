@@ -24,6 +24,7 @@ export {
   ClaudeAdapter,
   CodexAdapter,
   CursorAdapter,
+  AntigravityAdapter,
   CURSOR_DEFAULT_MODEL,
   CURSOR_WORKTREE_NAME_PATTERN,
   CURSOR_WORKTREES_ROOT_ENV,
@@ -194,7 +195,7 @@ export async function getCapabilities(provider: Provider): Promise<ProviderCapab
 }
 
 export async function getAllCapabilities(): Promise<ProviderCapabilities[]> {
-  return await Promise.all((["claude", "codex", "cursor"] as const).map(getCapabilities));
+  return await Promise.all((["claude", "codex", "cursor", "antigravity"] as const).map(getCapabilities));
 }
 
 export async function listModels(provider: Provider, options: ListModelsOptions = {}): Promise<string[]> {

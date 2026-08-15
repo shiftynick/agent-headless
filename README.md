@@ -1,14 +1,14 @@
 # agent-headless
 
-One typed, scriptable interface for running Claude Code, Codex, and Cursor
-Agent headlessly. The package normalizes the intent common to all three CLIs
+One typed, scriptable interface for running Claude Code, Codex, Cursor Agent,
+and Antigravity CLI headlessly. The package normalizes the intent common to all four CLIs
 while rejecting unsupported combinations instead of silently dropping them.
 
 ## Install and requirements
 
 - Node.js 20 or newer
-- One or more authenticated provider CLIs: `claude`, `codex`, or Cursor's
-  `agent`
+- One or more authenticated provider CLIs: `claude`, `codex`, Cursor's `agent`,
+  or Antigravity's `agy`
 
 Until the package is published to npm, install a released GitHub checkout or a
 local clone:
@@ -23,13 +23,13 @@ Bun is used only to build and test this repository. Consumers execute the
 checked-in `dist/` package with Node.
 
 Environment overrides are supported for nonstandard installs:
-`CLAUDE_BIN`, `CODEX_BIN`, and `CURSOR_AGENT_BIN`.
+`CLAUDE_BIN`, `CODEX_BIN`, `CURSOR_AGENT_BIN`, and `AGY_BIN`.
 
 ## CLI
 
 ```powershell
 agent-headless capabilities
-agent-headless models <claude|codex|cursor>
+agent-headless models <claude|codex|cursor|antigravity>
 
 agent-headless run `
   --provider codex `
@@ -161,20 +161,29 @@ callers that want to compute or verify the location themselves.
 
 ## Compatibility matrix
 
-| Capability | Claude | Codex | Cursor |
-| --- | --- | --- | --- |
-| Read-only inspection | yes | yes | yes |
-| In-place workspace edits | yes | yes | intentionally unsupported |
-| Isolated worktree edits | yes | unsupported | yes |
-| Ephemeral sessions | yes | yes | unavailable |
-| Resume | yes | yes | yes |
-| Effort | native flag | config override | parameterized model ID |
-| JSON Schema output | yes | file-based | unavailable |
-| Per-run budget | yes | unavailable | unavailable |
+| Capability | Claude | Codex | Cursor | Antigravity |
+| --- | --- | --- | --- | --- |
+| Read-only inspection | yes | yes | yes | plan mode |
+| In-place workspace edits | yes | yes | intentionally unsupported | yes |
+| Isolated worktree edits | yes | unsupported | yes | unavailable |
+| Ephemeral sessions | yes | yes | unavailable | unavailable |
+| Resume | yes | yes | yes | yes |
+| Effort | native flag | config override | parameterized model ID | native flag (low/medium/high) |
+| JSON Schema output | yes | file-based | unavailable | yes |
+| Per-run budget | yes | unavailable | unavailable | unavailable |
 
 The same matrix is available programmatically alongside executable status.
-Unsupported edges are rejected rather than ignored: Cursor has no ephemeral
-session or schema output; Codex cannot change access or additional directories
+Antigravity uses AGY's `--print` / `--output-format stream-json` contract and
+live-lists the authenticated account's models through `agy models`; its catalog
+is intentionally not pinned in `SUPPORTED_MODELS`. Its `plan` mode is used for
+`answer-only` and `inspect` requests, while explicit `edit-workspace` uses
+`accept-edits`. AGY has no ephemeral-session or isolated-worktree mode. Its
+terminal-command permissions are configured separately by AGY, so its plan mode
+is not a filesystem sandbox; this library never enables AGY's
+`--dangerously-skip-permissions` flag.
+
+Unsupported edges are rejected rather than ignored: Cursor and Antigravity have no ephemeral
+sessions; Cursor has no schema output; Codex cannot change access or additional directories
 when resuming and has no `max` effort mapping.
 
 The library never enables provider flags that bypass approvals or sandboxes.

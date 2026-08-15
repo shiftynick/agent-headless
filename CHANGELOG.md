@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.0
+
+- Added `antigravity`, backed by Antigravity CLI (`agy`), as a fourth provider.
+  It supports structured print-mode results, authenticated live model listing,
+  persistent/resumable conversations, low/medium/high effort, JSON Schema,
+  additional directories, and the `AGY_BIN` executable override.
+- Antigravity supports `answer-only`, `inspect`, and `edit-workspace`; it has no
+  ephemeral-session or isolated-worktree capability. The runner never enables
+  `--dangerously-skip-permissions`.
+
 ## 0.4.0
 
 - `models <claude|codex|cursor>` prints a curated supported-model list instead of

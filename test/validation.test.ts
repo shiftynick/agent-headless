@@ -9,12 +9,14 @@ describe("normalizeRequest", () => {
     }
   });
 
-  test("uses persistent sessions for Cursor because it has no ephemeral flag", () => {
-    expect(normalizeRequest({ provider: "cursor", prompt: "x", cwd: process.cwd() }).session).toEqual({ mode: "persistent" });
+  test("uses persistent sessions for providers without an ephemeral mode", () => {
+    for (const provider of ["cursor", "antigravity"] as const) {
+      expect(normalizeRequest({ provider, prompt: "x", cwd: process.cwd() }).session).toEqual({ mode: "persistent" });
+    }
   });
 
   test("defaults every new session to least-privilege answer-only access", () => {
-    for (const provider of ["claude", "codex", "cursor"] as const) {
+    for (const provider of ["claude", "codex", "cursor", "antigravity"] as const) {
       expect(normalizeRequest({ provider, prompt: "x", cwd: process.cwd() }).access).toBe("answer-only");
     }
   });
