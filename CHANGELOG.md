@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.1
+
+- On Windows, Antigravity now resolves `AGY_BIN` first, then `agy` on PATH,
+  then the standard per-user installer path `%LOCALAPPDATA%\agy\bin\agy.exe`.
+  The runner does not modify PATH or scan for executables outside that path.
+
 ## 0.5.0
 
 - Added `antigravity`, backed by Antigravity CLI (`agy`), as a fourth provider.

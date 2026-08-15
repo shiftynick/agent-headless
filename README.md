@@ -25,6 +25,11 @@ checked-in `dist/` package with Node.
 Environment overrides are supported for nonstandard installs:
 `CLAUDE_BIN`, `CODEX_BIN`, `CURSOR_AGENT_BIN`, and `AGY_BIN`.
 
+On Windows, when `AGY_BIN` is unset and `agy` is not on PATH, Antigravity also
+uses the standard per-user installer path `%LOCALAPPDATA%\agy\bin\agy.exe`.
+The runner does not modify PATH. Set `AGY_BIN` when the CLI is installed
+elsewhere.
+
 ## CLI
 
 ```powershell

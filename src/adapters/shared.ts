@@ -1,5 +1,7 @@
+import { existsSync } from "node:fs";
+import path from "node:path";
 import { AgentHeadlessError, unsupported } from "../errors";
-import { envValue } from "../process";
+import { effectiveEnv, envValue, resolveOnWindows } from "../process";
 import { asRecord } from "../jsonl";
 import type { AgentEvent, ParsedOutput, Provider, RunRequest, SessionMode } from "../types";
 
@@ -66,9 +68,23 @@ export function envExecutable(provider: Provider, requestEnv?: Record<string, st
         ? "CURSOR_AGENT_BIN"
         : "AGY_BIN";
   const fallback = provider === "cursor" ? "agent" : provider === "antigravity" ? "agy" : provider;
-  // requestEnv is a plain object, so a case-sensitive read would ignore a
-  // differently cased override that the child environment will honour.
-  return (requestEnv ? envValue(requestEnv, key) : undefined) || process.env[key] || fallback;
+  // Read the effective child environment. A case-sensitive or partial read
+  // could disagree with the process we launch, especially on Windows.
+  const env = effectiveEnv(requestEnv);
+  const override = envValue(env, key);
+  if (override) return override;
+
+  if (provider !== "antigravity" || process.platform !== "win32") return fallback;
+
+  // AGY's Windows installer puts its executable here but does not always add
+  // the directory to PATH. Prefer a PATH-resolved executable when available,
+  // then use the documented per-user install path. Do not edit PATH or search
+  // the host filesystem for a provider executable.
+  const pathExecutable = resolveOnWindows(fallback, env);
+  if (pathExecutable !== fallback) return pathExecutable;
+  const localAppData = envValue(env, "LOCALAPPDATA");
+  const installed = localAppData && path.join(localAppData, "agy", "bin", "agy.exe");
+  return installed && existsSync(installed) ? installed : fallback;
 }
 
 export function assertAccess(request: RunRequest, allowed: string[]): void {

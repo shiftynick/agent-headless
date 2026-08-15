@@ -1,6 +1,6 @@
 {
   "name": "agent-headless",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "One typed headless interface for Claude Code, Codex, Cursor Agent, and Antigravity CLIs.",
   "type": "module",
   "bin": {

@@ -343,6 +343,8 @@ async function probeExecutable(provider, command, cwd) {
 }
 
 // src/adapters/shared.ts
+import { existsSync as existsSync2 } from "node:fs";
+import path2 from "node:path";
 var ERROR_TYPE = /^error(?:\.|$)/u;
 function isExplicitFailure(event, extraTypes = []) {
   return ERROR_TYPE.test(event.type) || extraTypes.includes(event.type);
@@ -372,7 +374,18 @@ function providerFailureMessage(label, event) {
 function envExecutable(provider, requestEnv) {
   const key = provider === "claude" ? "CLAUDE_BIN" : provider === "codex" ? "CODEX_BIN" : provider === "cursor" ? "CURSOR_AGENT_BIN" : "AGY_BIN";
   const fallback = provider === "cursor" ? "agent" : provider === "antigravity" ? "agy" : provider;
-  return (requestEnv ? envValue(requestEnv, key) : undefined) || process.env[key] || fallback;
+  const env = effectiveEnv(requestEnv);
+  const override = envValue(env, key);
+  if (override)
+    return override;
+  if (provider !== "antigravity" || process.platform !== "win32")
+    return fallback;
+  const pathExecutable = resolveOnWindows(fallback, env);
+  if (pathExecutable !== fallback)
+    return pathExecutable;
+  const localAppData = envValue(env, "LOCALAPPDATA");
+  const installed = localAppData && path2.join(localAppData, "agy", "bin", "agy.exe");
+  return installed && existsSync2(installed) ? installed : fallback;
 }
 function assertAccess(request, allowed) {
   if (!allowed.includes(request.access)) {
@@ -538,7 +551,7 @@ class ClaudeAdapter {
 }
 
 // src/adapters/codex.ts
-import path2 from "node:path";
+import path3 from "node:path";
 var CODEX_FAILURE_TYPES = ["turn.failed"];
 
 class CodexAdapter {
@@ -608,7 +621,7 @@ class CodexAdapter {
     if (request.effort)
       args.push("-c", `model_reasoning_effort=${JSON.stringify(request.effort)}`);
     if (request.schema)
-      args.push("--output-schema", path2.resolve(request.schema));
+      args.push("--output-schema", path3.resolve(request.schema));
     if (request.output === "events")
       args.push("--json");
     args.push("-");
@@ -668,9 +681,9 @@ class CodexAdapter {
 // src/adapters/cursor.ts
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync as existsSync2 } from "node:fs";
+import { existsSync as existsSync3 } from "node:fs";
 import { homedir } from "node:os";
-import path3 from "node:path";
+import path4 from "node:path";
 function cursorModel(model, effort) {
   if (!effort)
     return model;
@@ -719,7 +732,7 @@ function cursorWorktreesRoot(env) {
     return configured;
   try {
     const home = homedir();
-    return home ? path3.join(home, ".cursor", "worktrees") : undefined;
+    return home ? path4.join(home, ".cursor", "worktrees") : undefined;
   } catch {
     return;
   }
@@ -731,9 +744,9 @@ function slugifyRepoName(name) {
 function hasGitAncestor(start) {
   let current = start;
   for (;; ) {
-    if (existsSync2(path3.join(current, ".git")))
+    if (existsSync3(path4.join(current, ".git")))
       return true;
-    const parent = path3.dirname(current);
+    const parent = path4.dirname(current);
     if (parent === current)
       return false;
     current = parent;
@@ -754,7 +767,7 @@ function gitToplevel(cwd, env) {
     if (result.error || result.status !== 0)
       return;
     const toplevel = result.stdout.trim();
-    return toplevel ? path3.resolve(toplevel) : undefined;
+    return toplevel ? path4.resolve(toplevel) : undefined;
   } catch {
     return;
   }
@@ -773,13 +786,13 @@ function repoSlugKey(cwd, env) {
   return JSON.stringify([cwd, envKeyPart(env)]);
 }
 function cursorRepoSlug(cwd, env) {
-  const start = path3.resolve(cwd);
+  const start = path4.resolve(cwd);
   const key = repoSlugKey(start, env);
   const cached = repoSlugCache.get(key);
   if (cached !== undefined || repoSlugCache.has(key))
     return cached;
   const toplevel = hasGitAncestor(start) ? gitToplevel(start, env) : undefined;
-  const slug = toplevel === undefined ? undefined : slugifyRepoName(path3.basename(toplevel));
+  const slug = toplevel === undefined ? undefined : slugifyRepoName(path4.basename(toplevel));
   repoSlugCache.set(key, slug);
   return slug;
 }
@@ -793,7 +806,7 @@ function cursorWorktreePath(request, cwd = request.cwd, env = request.env) {
   const slug = cursorRepoSlug(cwd, env);
   if (root === undefined || slug === undefined)
     return;
-  return path3.resolve(cwd, root, slug, name);
+  return path4.resolve(cwd, root, slug, name);
 }
 function modelWithEffort(model, effort) {
   const fast = model.endsWith("-fast") ? "-fast" : "";
@@ -1092,13 +1105,13 @@ function getAdapter(provider) {
 }
 
 // src/validation.ts
-import { existsSync as existsSync3, realpathSync, statSync } from "node:fs";
+import { existsSync as existsSync4, realpathSync, statSync } from "node:fs";
 function normalizeRequest(request) {
   if (!request.prompt?.trim())
     invalid("prompt must be non-empty");
   if (!request.cwd)
     invalid("cwd is required");
-  if (!existsSync3(request.cwd) || !statSync(request.cwd).isDirectory()) {
+  if (!existsSync4(request.cwd) || !statSync(request.cwd).isDirectory()) {
     invalid(`cwd is not an existing directory: ${request.cwd}`);
   }
   if (request.timeoutMs !== undefined && (!Number.isFinite(request.timeoutMs) || request.timeoutMs <= 0)) {
@@ -1110,7 +1123,7 @@ function normalizeRequest(request) {
   if (request.model !== undefined && !request.model.trim())
     invalid("model must be non-empty");
   const additionalDirs = request.additionalDirs?.map((directory) => {
-    if (!existsSync3(directory) || !statSync(directory).isDirectory()) {
+    if (!existsSync4(directory) || !statSync(directory).isDirectory()) {
       invalid(`additional directory does not exist: ${directory}`);
     }
     return realpathSync(directory);
@@ -1127,11 +1140,11 @@ function normalizeRequest(request) {
 }
 
 // src/workspace.ts
-import path4 from "node:path";
+import path5 from "node:path";
 var WORKTREE_KEYS = ["worktree_path", "worktreePath", "worktree_dir", "worktreeDir", "worktree"];
 function samePath(left, right) {
   const normalize = (value) => {
-    const resolved = path4.normalize(value).replace(/[\\/]+$/u, "");
+    const resolved = path5.normalize(value).replace(/[\\/]+$/u, "");
     return process.platform === "win32" ? resolved.toLowerCase() : resolved;
   };
   return normalize(left) === normalize(right);
@@ -1179,10 +1192,10 @@ function absoluteReported(disclosed, cwd) {
   const trimmed = disclosed.trim();
   if (!trimmed)
     return;
-  if (path4.isAbsolute(trimmed))
+  if (path5.isAbsolute(trimmed))
     return trimmed;
-  const resolved = path4.resolve(cwd, trimmed);
-  return path4.isAbsolute(resolved) ? resolved : undefined;
+  const resolved = path5.resolve(cwd, trimmed);
+  return path5.isAbsolute(resolved) ? resolved : undefined;
 }
 function describeWorkspace(request, cwd, events, stdout) {
   const isolated = request.access === "edit-isolated";
@@ -1197,13 +1210,13 @@ function describeWorkspace(request, cwd, events, stdout) {
     cwd,
     access: request.access,
     ...worktree ? { worktree, worktreeSource: reported ? "reported" : "derived" } : {},
-    ...derived ? { worktreeRoot: path4.dirname(derived) } : {},
+    ...derived ? { worktreeRoot: path5.dirname(derived) } : {},
     ...worktreeName ? { worktreeName } : {},
     ...worktreeBase ? { worktreeBase } : {}
   };
 }
 // src/version.ts
-var VERSION = "0.5.0";
+var VERSION = "0.5.1";
 
 // src/index.ts
 var MODEL_REJECTION = /(?:unknown|unrecognized|unsupported|invalid|unavailable)\s+model|no\s+such\s+model|model\b[^\n]{0,80}?(?:not\s+(?:found|available|supported|recognized)|does\s+not\s+exist|is\s+invalid|is\s+no\s+longer)/iu;

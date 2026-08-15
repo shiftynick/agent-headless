@@ -165,7 +165,7 @@ describe("AntigravityAdapter", () => {
       providerOptions: { antigravity: { sandbox: true, agent: "reviewer", project: "p1" } },
       timeoutMs: 12_345,
     }));
-    expect(invocation.command).toBe(process.env.AGY_BIN ?? "agy");
+    expect(invocation.command).toBe(envExecutable("antigravity"));
     expect(invocation.args).toEqual([
       "--print", "Say OK", "--output-format", "stream-json", "--print-timeout", "12345ms",
       "--mode", "plan", "--model", "gemini-3.7-flash-high", "--effort", "high",
@@ -870,6 +870,38 @@ describe("environment reads mirror Windows case-insensitivity", () => {
   winOnly("an arbitrarily cased provider-bin override selects the executable", () => {
     expect(envExecutable("claude", { claude_bin: "X:/somewhere/claude-custom.exe" }))
       .toBe("X:/somewhere/claude-custom.exe");
+  });
+
+  winOnly("Antigravity finds the standard per-user installation when PATH does not", () => {
+    const localAppData = mkdtempSync(path.join(tmpdir(), "ah-agy-local-"));
+    const installed = path.join(localAppData, "agy", "bin", "agy.exe");
+    try {
+      mkdirSync(path.dirname(installed), { recursive: true });
+      writeFileSync(installed, "stub");
+      expect(envExecutable("antigravity", { LOCALAPPDATA: localAppData, PATH: "" })).toBe(installed);
+    } finally {
+      rmSync(localAppData, { recursive: true, force: true });
+    }
+  });
+
+  winOnly("Antigravity prefers AGY_BIN and PATH over the standard installation", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "ah-agy-priority-"));
+    const localAppData = path.join(root, "local");
+    const pathDir = path.join(root, "path");
+    const installed = path.join(localAppData, "agy", "bin", "agy.exe");
+    const onPath = path.join(pathDir, "agy.exe");
+    try {
+      mkdirSync(path.dirname(installed), { recursive: true });
+      mkdirSync(pathDir, { recursive: true });
+      writeFileSync(installed, "installed");
+      writeFileSync(onPath, "path");
+      const env = { LOCALAPPDATA: localAppData, PATH: pathDir, PATHEXT: ".EXE" };
+      expect(envExecutable("antigravity", env).toLowerCase()).toBe(onPath.toLowerCase());
+      expect(envExecutable("antigravity", { ...env, AGY_BIN: "X:/custom/agy.exe" }))
+        .toBe("X:/custom/agy.exe");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("case-sensitive platforms keep case-sensitive reads", () => {
