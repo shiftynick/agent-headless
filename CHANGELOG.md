@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.2
+
+- Antigravity now explicitly passes an operator-selected model from AGY's live
+  authenticated catalog through to the CLI. It does not apply a stale local
+  model allowlist.
+
 ## 0.5.1
 
 - On Windows, Antigravity now resolves `AGY_BIN` first, then `agy` on PATH,

@@ -175,6 +175,11 @@ describe("AntigravityAdapter", () => {
     expect(invocation.stdin).toBe("");
   });
 
+  test("passes an operator-selected live-catalog model through to AGY", () => {
+    const invocation = adapter.build(request("antigravity", { model: "gemini-3.7-flash-high" }));
+    expectFlag(invocation.args, "--model", "gemini-3.7-flash-high");
+  });
+
   test("maps explicit workspace edits and conversation resume", () => {
     const edit = adapter.build(request("antigravity", { access: "edit-workspace" }));
     expectFlag(edit.args, "--mode", "accept-edits");

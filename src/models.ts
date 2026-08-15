@@ -57,9 +57,10 @@ export function assertSupportedModel(provider: Provider, model: string): void {
     }
     return;
   }
-  if (provider === "antigravity") {
-    unsupported("Antigravity models are resolved from the authenticated AGY CLI; run `agent-headless models antigravity`");
-  }
+  // Antigravity has an authenticated live catalog. Its adapter passes an
+  // operator-selected model ID through to AGY, rather than applying a stale
+  // local allowlist.
+  if (provider === "antigravity") return;
   if (/^cursor-grok-.*-fast$/u.test(model)) {
     unsupported(`Cursor Grok fast variants are not allowed; use ${model.replace(/-fast$/u, "")}`);
   }

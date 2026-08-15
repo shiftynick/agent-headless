@@ -131,9 +131,8 @@ function assertSupportedModel(provider, model) {
     }
     return;
   }
-  if (provider === "antigravity") {
-    unsupported("Antigravity models are resolved from the authenticated AGY CLI; run `agent-headless models antigravity`");
-  }
+  if (provider === "antigravity")
+    return;
   if (/^cursor-grok-.*-fast$/u.test(model)) {
     unsupported(`Cursor Grok fast variants are not allowed; use ${model.replace(/-fast$/u, "")}`);
   }
@@ -1216,7 +1215,7 @@ function describeWorkspace(request, cwd, events, stdout) {
   };
 }
 // src/version.ts
-var VERSION = "0.5.1";
+var VERSION = "0.5.2";
 
 // src/index.ts
 var MODEL_REJECTION = /(?:unknown|unrecognized|unsupported|invalid|unavailable)\s+model|no\s+such\s+model|model\b[^\n]{0,80}?(?:not\s+(?:found|available|supported|recognized)|does\s+not\s+exist|is\s+invalid|is\s+no\s+longer)/iu;
