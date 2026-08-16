@@ -269,7 +269,11 @@ describe("CursorAdapter", () => {
     }));
     expect(invocation.args).toContain("--worktree");
     if (process.platform === "win32") expect(invocation.args).not.toContain("--sandbox");
-    else expect(invocation.args).toContainAllValues(["--sandbox", "enabled"]);
+    else {
+      const sandbox = invocation.args.indexOf("--sandbox");
+      expect(sandbox).not.toBe(-1);
+      expect(invocation.args.slice(sandbox, sandbox + 2)).toEqual(["--sandbox", "enabled"]);
+    }
   });
 
   test("falls back to the documented default model when none was named", async () => {

@@ -8,6 +8,7 @@ const help = `agent-headless - one headless interface for Claude, Codex, Cursor,
 
 Usage:
   agent-headless run --provider <claude|codex|cursor|antigravity> --prompt <text> [options]
+  agent-headless doctor [provider]
   agent-headless capabilities [provider]
   agent-headless models <claude|codex|cursor|antigravity>
   agent-headless --version
@@ -126,10 +127,10 @@ async function main(): Promise<void> {
     console.log(VERSION);
     return;
   }
-  if (command === "capabilities") {
+  if (command === "capabilities" || command === "doctor") {
     const provider = args[0] as Provider | undefined;
     if (provider && !["claude", "codex", "cursor", "antigravity"].includes(provider)) {
-      throw new AgentHeadlessError("invalid_request", "capabilities provider must be claude, codex, cursor, or antigravity");
+      throw new AgentHeadlessError("invalid_request", `${command} provider must be claude, codex, cursor, or antigravity`);
     }
     console.log(JSON.stringify(provider ? await getCapabilities(provider) : await getAllCapabilities(), null, 2));
     return;
