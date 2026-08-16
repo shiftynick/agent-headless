@@ -4,19 +4,28 @@ One typed, scriptable interface for running Claude Code, Codex, Cursor Agent,
 and Antigravity CLI headlessly. The package normalizes the intent common to all four CLIs
 while rejecting unsupported combinations instead of silently dropping them.
 
+It is for automation and agent supervisors that need one explicit, typed contract
+over the provider CLIs already authenticated on the machine. It is not a new
+model service, an MCP server, or an authentication proxy.
+
 ## Install and requirements
 
 - Node.js 20 or newer
 - One or more authenticated provider CLIs: `claude`, `codex`, Cursor's `agent`,
   or Antigravity's `agy`
 
-Until the package is published to npm, install a released GitHub checkout or a
-local clone:
+Run it without a global install:
 
 ```powershell
-npm install --global N:\agent-headless
-# after a release tag is pushed:
-npm install --global github:shiftynick/agent-headless#v0.2.0
+npx -y agent-headless@latest --help
+npx -y agent-headless@latest doctor
+```
+
+Or install it globally:
+
+```powershell
+npm install --global agent-headless
+agent-headless doctor
 ```
 
 Bun is used only to build and test this repository. Consumers execute the
@@ -29,6 +38,33 @@ On Windows, when `AGY_BIN` is unset and `agy` is not on PATH, Antigravity also
 uses the standard per-user installer path `%LOCALAPPDATA%\agy\bin\agy.exe`.
 The runner does not modify PATH. Set `AGY_BIN` when the CLI is installed
 elsewhere.
+
+## For agents
+
+When this package is added to a project, load the bundled
+[`agent-headless` skill](skills/agent-headless/SKILL.md) before delegating work.
+It describes the safe defaults and the access model shared by the provider
+adapters. If the runtime cannot install project skills, read that file first.
+
+This package uses the authentication already configured by each provider CLI;
+it never accepts, stores, or prints provider tokens. Authenticate with the
+provider's own supported flow or a runtime secret store, never in source control
+or chat. `.env` remains ignored. The only configuration this package reads is
+the optional executable-path overrides listed above.
+
+Start with a read-only discovery check, then choose a named model before a
+meaningful run:
+
+```powershell
+npx -y agent-headless@latest doctor
+npx -y agent-headless@latest capabilities codex
+npx -y agent-headless@latest models codex
+npx -y agent-headless@latest --help
+```
+
+`doctor` is an alias for the read-only capability probe. It reports whether the
+provider executable can be found and queried; it does not send a prompt or
+enable a permission-bypass flag.
 
 ## CLI
 
@@ -241,3 +277,27 @@ Live tests are opt-in because they use authenticated model calls:
 $env:AGENT_HEADLESS_LIVE = "1"
 bun test test/live.test.ts
 ```
+
+Live tests are read-only answer-only prompts. They run only when explicitly
+enabled and use whichever provider CLIs are already authenticated; they never
+read credentials from project files or print them.
+
+## Maintainer release
+
+Run the complete local gate before opening a pull request:
+
+```powershell
+npm ci
+bun run check
+npm pack --dry-run
+npm run audit:prod
+git diff --check
+```
+
+CI repeats those checks on supported Node releases. Publishing is deliberately
+manual and uses npm Trusted Publishing with a short-lived GitHub Actions OIDC
+credential—there is no `NPM_TOKEN` in this repository. The first npm release
+must exist before npm can attach a trusted publisher, so it may require an
+interactive, 2FA-protected maintainer publish. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for the exact release, trusted-publisher,
+registry verification, tag, and GitHub Release procedure.

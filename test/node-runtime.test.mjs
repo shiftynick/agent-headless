@@ -1,7 +1,40 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import path from "node:path";
+import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { runAgent, VERSION } from "../dist/index.js";
+
+const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+const cliPath = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
+
+function runCli(args) {
+  const outsideRepository = mkdtempSync(path.join(tmpdir(), "agent-headless-cli-"));
+  try {
+    return spawnSync(process.execPath, [cliPath, ...args], {
+      cwd: outsideRepository,
+      encoding: "utf8",
+      env: { ...process.env },
+    });
+  } finally {
+    rmSync(outsideRepository, { recursive: true, force: true });
+  }
+}
+
+test("the compiled CLI shows help with no provider configuration", () => {
+  const result = runCli(["--help"]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Usage:/u);
+  assert.match(result.stdout, /agent-headless doctor/u);
+});
+
+test("the compiled CLI version matches package.json with no provider configuration", () => {
+  const result = runCli(["--version"]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim(), manifest.version);
+});
 
 test("the packaged library runs on Node and accepts a deterministic executor", async () => {
   let captured;
@@ -34,7 +67,6 @@ test("the packaged library runs on Node and accepts a deterministic executor", a
   // Compared against the manifest rather than a literal: a hardcoded version
   // goes stale at the next release and then fails for the wrong reason, which is
   // exactly what it did between 0.2.0 and 0.3.0.
-  const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   assert.equal(VERSION, manifest.version);
   assert.equal(captured.stdin, "Say OK");
   assert.equal(result.status, "succeeded");
