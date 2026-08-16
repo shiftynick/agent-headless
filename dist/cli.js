@@ -101,6 +101,9 @@ var SUPPORTED_MODELS = Object.freeze({
     "cursor-grok-4.5-low",
     "cursor-grok-4.5-medium",
     "cursor-grok-4.5-high",
+    "cursor-grok-4.6-low",
+    "cursor-grok-4.6-medium",
+    "cursor-grok-4.6-high",
     "composer-2.5",
     "composer-2.5-fast"
   ]),
@@ -702,7 +705,7 @@ function cursorModel(model, effort) {
     return `${match[1]}[${parameters.replace(/(^|,)effort=[^,]+/u, `$1effort=${effort}`)}]`;
   return `${match[1]}[${parameters}${parameters ? "," : ""}effort=${effort}]`;
 }
-var CURSOR_DEFAULT_MODEL = "cursor-grok-4.5-medium";
+var CURSOR_DEFAULT_MODEL = "cursor-grok-4.6-medium";
 var WORKTREE_NAME_PREFIX = "agent-headless";
 function generateWorktreeName() {
   return `${WORKTREE_NAME_PREFIX}-${Date.now().toString(36)}-${randomUUID().replace(/-/gu, "").slice(0, 12)}`;
@@ -1217,7 +1220,7 @@ function describeWorkspace(request, cwd, events, stdout) {
   };
 }
 // src/version.ts
-var VERSION = "0.5.2";
+var VERSION = "0.6.0";
 
 // src/index.ts
 var MODEL_REJECTION = /(?:unknown|unrecognized|unsupported|invalid|unavailable)\s+model|no\s+such\s+model|model\b[^\n]{0,80}?(?:not\s+(?:found|available|supported|recognized)|does\s+not\s+exist|is\s+invalid|is\s+no\s+longer)/iu;
@@ -1375,7 +1378,7 @@ Run options:
   --prompt-file <path>            Read prompt from a UTF-8 file
   --cwd <path>                    Working directory (default: current directory)
   --model <id>                    Provider model or alias; when omitted, Cursor
-                                  falls back to cursor-grok-4.5-medium and the
+                                  falls back to cursor-grok-4.6-medium and the
                                   result reports modelDefaulted: true
   --effort <level>                low, medium, high, xhigh, or max
   --access <mode>                 answer-only (default), inspect, edit-workspace, edit-isolated, inherit-session

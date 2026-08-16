@@ -18,7 +18,7 @@ Run options:
   --prompt-file <path>            Read prompt from a UTF-8 file
   --cwd <path>                    Working directory (default: current directory)
   --model <id>                    Provider model or alias; when omitted, Cursor
-                                  falls back to cursor-grok-4.5-medium and the
+                                  falls back to cursor-grok-4.6-medium and the
                                   result reports modelDefaulted: true
   --effort <level>                low, medium, high, xhigh, or max
   --access <mode>                 answer-only (default), inspect, edit-workspace, edit-isolated, inherit-session

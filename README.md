@@ -141,7 +141,7 @@ for where that path comes from and when it can still be absent.
 
 Cursor no longer requires an explicit model. When a request names none, the
 runner uses the exported constant `CURSOR_DEFAULT_MODEL`
-(`cursor-grok-4.5-medium`) - read the constant rather than hardcoding the string.
+(`cursor-grok-4.6-medium`) - read the constant rather than hardcoding the string.
 An explicit `--model` / `request.model` always wins; `auto` is still refused,
 because a run must be attributable to a named model.
 
