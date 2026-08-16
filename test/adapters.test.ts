@@ -278,6 +278,7 @@ describe("CursorAdapter", () => {
 
   test("falls back to the documented default model when none was named", async () => {
     const prepared = await adapter.prepare(request("cursor", { access: "answer-only" }));
+    expect(CURSOR_DEFAULT_MODEL).toBe("cursor-grok-4.6-medium");
     expect(prepared.model).toBe(CURSOR_DEFAULT_MODEL);
     expect(adapter.build(prepared).args).toContain(CURSOR_DEFAULT_MODEL);
     // Also holds for a direct build that never went through prepare.
@@ -288,6 +289,13 @@ describe("CursorAdapter", () => {
     const prepared = await adapter.prepare(request("cursor", { model: "cursor-grok-4.5-high" }));
     expect(prepared.model).toBe("cursor-grok-4.5-high");
     expect(adapter.build(prepared).args).not.toContain(CURSOR_DEFAULT_MODEL);
+  });
+
+  test("keeps Grok 4.5 compatibility while accepting curated Grok 4.6 IDs", async () => {
+    for (const model of ["cursor-grok-4.5-medium", "cursor-grok-4.6-medium"]) {
+      const prepared = await adapter.prepare(request("cursor", { model }));
+      expect(prepared.model).toBe(model);
+    }
   });
 
   test("still refuses model=auto, which names no accountable model", () => {
@@ -795,6 +803,8 @@ describe("supported model lists", () => {
     expect(await new ClaudeAdapter().listModels()).toEqual([...SUPPORTED_MODELS.claude]);
     expect(await new CodexAdapter().listModels()).toEqual([...SUPPORTED_MODELS.codex]);
     expect(await new CursorAdapter().listModels()).toEqual([...SUPPORTED_MODELS.cursor]);
+    expect(SUPPORTED_MODELS.cursor).toContain("cursor-grok-4.5-medium");
+    expect(SUPPORTED_MODELS.cursor).toContain("cursor-grok-4.6-medium");
     expect(SUPPORTED_MODELS.cursor.includes("cursor-grok-4.5-medium-fast" as never)).toBe(false);
   });
 

@@ -284,7 +284,7 @@ test("Claude and Codex get no injected model default", async () => {
 
 test("a rejected default model is answered with the supported model list", async () => {
   const result = await runAgent(bareCursor, {
-    ...stubbed("", { exitCode: 1, stderr: "error: unknown model 'cursor-grok-4.5-medium'" }),
+    ...stubbed("", { exitCode: 1, stderr: "error: unknown model 'cursor-grok-4.6-medium'" }),
     listModels: async () => ["cursor-grok-4.5-high", "composer-2.5"],
   });
 
@@ -300,7 +300,7 @@ test("the rejected-default model listing is resolved against the run's own envir
   const result = await runAgent(
     { ...bareCursor, env },
     {
-      ...stubbed("", { exitCode: 1, stderr: "error: unknown model 'cursor-grok-4.5-medium'" }),
+      ...stubbed("", { exitCode: 1, stderr: "error: unknown model 'cursor-grok-4.6-medium'" }),
       listModels: async (provider, options) => {
         seen = { provider, ...options };
         return ["alt-install-model"];
