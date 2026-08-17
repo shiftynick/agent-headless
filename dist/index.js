@@ -410,6 +410,65 @@ ${detail}` : ""}`);
 }
 
 // src/adapters/claude.ts
+function stringValue(value) {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+function compatibleModelIdentity(left, right) {
+  const a = left.toLowerCase();
+  const b = right.toLowerCase();
+  return a === b || a.startsWith(`${b}-`) || b.startsWith(`${a}-`);
+}
+function modelUsageEntries(modelUsage) {
+  const entries = [];
+  for (const value of Object.values(modelUsage ?? {})) {
+    const usage = asRecord(value);
+    const model = stringValue(usage?.canonicalModel);
+    if (!model)
+      continue;
+    const outputTokens = numberValue(usage?.outputTokens);
+    const existing = entries.find((entry) => entry.model === model);
+    if (existing) {
+      if (outputTokens !== undefined)
+        existing.outputTokens = (existing.outputTokens ?? 0) + outputTokens;
+      continue;
+    }
+    entries.push({ model, ...outputTokens !== undefined ? { outputTokens } : {} });
+  }
+  return entries;
+}
+function usagePrincipal(entries) {
+  if (entries.length === 1)
+    return entries[0];
+  const measured = entries.filter((entry) => entry.outputTokens !== undefined);
+  if (!measured.length)
+    return;
+  const maximum = Math.max(...measured.map((entry) => entry.outputTokens));
+  const leaders = measured.filter((entry) => entry.outputTokens === maximum);
+  return leaders.length === 1 ? leaders[0] : undefined;
+}
+function lastPrincipalAssistantModel(events) {
+  for (let index = events.length - 1;index >= 0; index--) {
+    const raw = asRecord(events[index]?.raw);
+    if (raw?.type !== "assistant" || raw.isSidechain === true || raw.parent_tool_use_id != null)
+      continue;
+    const model = stringValue(asRecord(raw.message)?.model);
+    if (model)
+      return model;
+  }
+  return;
+}
+function lastInitModel(events) {
+  for (let index = events.length - 1;index >= 0; index--) {
+    const raw = asRecord(events[index]?.raw);
+    if (raw?.type === "system" && raw.subtype === "init") {
+      const model = stringValue(raw.model);
+      if (model)
+        return model;
+    }
+  }
+  return;
+}
+
 class ClaudeAdapter {
   provider = "claude";
   async capabilities(executable = envExecutable(this.provider)) {
@@ -541,12 +600,19 @@ class ClaudeAdapter {
     if (costUsd !== undefined)
       usage.costUsd = costUsd;
     const modelUsage = asRecord(result.modelUsage);
-    const firstModel = modelUsage ? asRecord(Object.values(modelUsage)[0]) : undefined;
+    const usageEntries = modelUsageEntries(modelUsage);
+    const measuredPrincipal = usagePrincipal(usageEntries);
+    const principalModel = lastPrincipalAssistantModel(events) ?? lastInitModel(events) ?? measuredPrincipal?.model;
+    const exactUsage = principalModel ? usageEntries.find((entry) => entry.model === principalModel) : undefined;
+    const compatibleUsage = principalModel ? usageEntries.filter((entry) => compatibleModelIdentity(entry.model, principalModel)) : [];
+    const principalUsage = exactUsage ?? (compatibleUsage.length === 1 ? compatibleUsage[0] : undefined) ?? (measuredPrincipal && principalModel && compatibleModelIdentity(measuredPrincipal.model, principalModel) ? measuredPrincipal : undefined);
+    const helperModels = principalUsage ? usageEntries.filter((entry) => entry !== principalUsage).map((entry) => entry.model) : principalModel ? usageEntries.filter((entry) => !compatibleModelIdentity(entry.model, principalModel)).map((entry) => entry.model) : [];
     return {
       events,
       ...typeof result.result === "string" ? { finalText: result.result } : {},
       ...typeof result.session_id === "string" ? { sessionId: result.session_id } : {},
-      ...typeof firstModel?.canonicalModel === "string" ? { modelObserved: firstModel.canonicalModel } : {},
+      ...principalModel ? { modelObserved: principalModel } : {},
+      ...helperModels.length ? { helperModelsObserved: helperModels } : {},
       ...Object.keys(usage).length ? { usage } : {}
     };
   }
@@ -1218,7 +1284,7 @@ function describeWorkspace(request, cwd, events, stdout) {
   };
 }
 // src/version.ts
-var VERSION = "0.6.0";
+var VERSION = "0.6.1";
 
 // src/index.ts
 var MODEL_REJECTION = /(?:unknown|unrecognized|unsupported|invalid|unavailable)\s+model|no\s+such\s+model|model\b[^\n]{0,80}?(?:not\s+(?:found|available|supported|recognized)|does\s+not\s+exist|is\s+invalid|is\s+no\s+longer)/iu;
@@ -1333,6 +1399,7 @@ ${processResult.stderr}`, options) : [];
     ...request.model ? { modelRequested: request.model } : {},
     ...modelDefaulted ? { modelDefaulted: true } : {},
     ...parsed.modelObserved ? { modelObserved: parsed.modelObserved } : {},
+    ...parsed.helperModelsObserved?.length ? { helperModelsObserved: parsed.helperModelsObserved } : {},
     ...parsed.usage ? { usage: parsed.usage } : {},
     warnings,
     workspace: describeWorkspace(request, invocation.cwd, parsed.events, processResult.stdout),

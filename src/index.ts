@@ -182,6 +182,7 @@ export async function runAgent(input: RunRequest, options: RunAgentOptions = {})
     ...(request.model ? { modelRequested: request.model } : {}),
     ...(modelDefaulted ? { modelDefaulted: true } : {}),
     ...(parsed.modelObserved ? { modelObserved: parsed.modelObserved } : {}),
+    ...(parsed.helperModelsObserved?.length ? { helperModelsObserved: parsed.helperModelsObserved } : {}),
     ...(parsed.usage ? { usage: parsed.usage } : {}),
     warnings,
     workspace: describeWorkspace(request, invocation.cwd, parsed.events, processResult.stdout),

@@ -21,6 +21,68 @@ import {
   textOutput,
 } from "./shared";
 
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function compatibleModelIdentity(left: string, right: string): boolean {
+  const a = left.toLowerCase();
+  const b = right.toLowerCase();
+  return a === b || a.startsWith(`${b}-`) || b.startsWith(`${a}-`);
+}
+
+interface ModelUsageEntry {
+  model: string;
+  outputTokens?: number;
+}
+
+function modelUsageEntries(modelUsage: Record<string, unknown> | undefined): ModelUsageEntry[] {
+  const entries: ModelUsageEntry[] = [];
+  for (const value of Object.values(modelUsage ?? {})) {
+    const usage = asRecord(value);
+    const model = stringValue(usage?.canonicalModel);
+    if (!model) continue;
+    const outputTokens = numberValue(usage?.outputTokens);
+    const existing = entries.find((entry) => entry.model === model);
+    if (existing) {
+      if (outputTokens !== undefined) existing.outputTokens = (existing.outputTokens ?? 0) + outputTokens;
+      continue;
+    }
+    entries.push({ model, ...(outputTokens !== undefined ? { outputTokens } : {}) });
+  }
+  return entries;
+}
+
+function usagePrincipal(entries: ModelUsageEntry[]): ModelUsageEntry | undefined {
+  if (entries.length === 1) return entries[0];
+  const measured = entries.filter((entry) => entry.outputTokens !== undefined);
+  if (!measured.length) return undefined;
+  const maximum = Math.max(...measured.map((entry) => entry.outputTokens!));
+  const leaders = measured.filter((entry) => entry.outputTokens === maximum);
+  return leaders.length === 1 ? leaders[0] : undefined;
+}
+
+function lastPrincipalAssistantModel(events: ParsedOutput["events"]): string | undefined {
+  for (let index = events.length - 1; index >= 0; index--) {
+    const raw = asRecord(events[index]?.raw);
+    if (raw?.type !== "assistant" || raw.isSidechain === true || raw.parent_tool_use_id != null) continue;
+    const model = stringValue(asRecord(raw.message)?.model);
+    if (model) return model;
+  }
+  return undefined;
+}
+
+function lastInitModel(events: ParsedOutput["events"]): string | undefined {
+  for (let index = events.length - 1; index >= 0; index--) {
+    const raw = asRecord(events[index]?.raw);
+    if (raw?.type === "system" && raw.subtype === "init") {
+      const model = stringValue(raw.model);
+      if (model) return model;
+    }
+  }
+  return undefined;
+}
+
 export class ClaudeAdapter implements ProviderAdapter {
   readonly provider = "claude" as const;
 
@@ -148,12 +210,43 @@ export class ClaudeAdapter implements ProviderAdapter {
     if (outputTokens !== undefined) usage.outputTokens = outputTokens;
     if (costUsd !== undefined) usage.costUsd = costUsd;
     const modelUsage = asRecord(result.modelUsage);
-    const firstModel = modelUsage ? asRecord(Object.values(modelUsage)[0]) : undefined;
+    const usageEntries = modelUsageEntries(modelUsage);
+    const measuredPrincipal = usagePrincipal(usageEntries);
+    // Claude's result.modelUsage includes internal helper models. The top-level
+    // non-sidechain assistant stream names the principal model; init is the
+    // next-best source. A usage-only result is attributable only when one model
+    // is present or one model has a unique highest output-token count.
+    const principalModel = lastPrincipalAssistantModel(events)
+      ?? lastInitModel(events)
+      ?? measuredPrincipal?.model;
+    const exactUsage = principalModel
+      ? usageEntries.find((entry) => entry.model === principalModel)
+      : undefined;
+    const compatibleUsage = principalModel
+      ? usageEntries.filter((entry) => compatibleModelIdentity(entry.model, principalModel))
+      : [];
+    const principalUsage = exactUsage
+      ?? (compatibleUsage.length === 1 ? compatibleUsage[0] : undefined)
+      ?? (measuredPrincipal && principalModel
+        && compatibleModelIdentity(measuredPrincipal.model, principalModel)
+        ? measuredPrincipal
+        : undefined);
+    // Without a matched principal usage entry the full split is uncertain, but
+    // incompatible entries are definitively not the principal and remain useful
+    // helper evidence.
+    const helperModels = principalUsage
+      ? usageEntries.filter((entry) => entry !== principalUsage).map((entry) => entry.model)
+      : principalModel
+        ? usageEntries
+          .filter((entry) => !compatibleModelIdentity(entry.model, principalModel))
+          .map((entry) => entry.model)
+        : [];
     return {
       events,
       ...(typeof result.result === "string" ? { finalText: result.result } : {}),
       ...(typeof result.session_id === "string" ? { sessionId: result.session_id } : {}),
-      ...(typeof firstModel?.canonicalModel === "string" ? { modelObserved: firstModel.canonicalModel } : {}),
+      ...(principalModel ? { modelObserved: principalModel } : {}),
+      ...(helperModels.length ? { helperModelsObserved: helperModels } : {}),
       ...(Object.keys(usage).length ? { usage } : {}),
     };
   }

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.1
+
+- Claude structured results now distinguish the principal response model in
+  `modelObserved` from internal models in `helperModelsObserved`. Principal
+  attribution prefers non-sidechain assistant output, then session init, then
+  an unambiguous usage leader; ambiguous usage-only results omit attribution
+  rather than trusting object order.
+
 ## 0.5.2
 
 - Antigravity now explicitly passes an operator-selected model from AGY's live

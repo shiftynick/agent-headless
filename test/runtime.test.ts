@@ -282,6 +282,33 @@ test("Claude and Codex get no injected model default", async () => {
   }
 });
 
+test("Claude principal and helper attribution survives result normalization", async () => {
+  const stdout = [
+    JSON.stringify({ type: "system", subtype: "init", session_id: "s1", model: "claude-sonnet-5" }),
+    JSON.stringify({ type: "assistant", message: { model: "claude-sonnet-5", content: [] }, session_id: "s1" }),
+    JSON.stringify({
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      result: "ok",
+      session_id: "s1",
+      modelUsage: {
+        helper: { canonicalModel: "claude-haiku-4-5" },
+        principal: { canonicalModel: "claude-sonnet-5-20260801" },
+      },
+    }),
+  ].join("\n");
+
+  const result = await runAgent(
+    { provider: "claude", prompt: "x", cwd: process.cwd(), model: "claude-sonnet-5" },
+    stubbed(stdout),
+  );
+
+  expect(result.modelRequested).toBe("claude-sonnet-5");
+  expect(result.modelObserved).toBe("claude-sonnet-5");
+  expect(result.helperModelsObserved).toEqual(["claude-haiku-4-5"]);
+});
+
 test("a rejected default model is answered with the supported model list", async () => {
   const result = await runAgent(bareCursor, {
     ...stubbed("", { exitCode: 1, stderr: "error: unknown model 'cursor-grok-4.6-medium'" }),
