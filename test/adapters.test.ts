@@ -84,6 +84,126 @@ describe("ClaudeAdapter", () => {
       ],
     });
   });
+
+  test("separates the principal Claude model from internal helper usage", () => {
+    const stdout = [
+      JSON.stringify({ type: "system", subtype: "init", session_id: "s1", model: "claude-sonnet-5" }),
+      JSON.stringify({ type: "assistant", message: { model: "claude-sonnet-5", content: [] }, session_id: "s1" }),
+      JSON.stringify({ type: "assistant", isSidechain: true, parent_tool_use_id: "tool-1", message: { model: "claude-haiku-4-5", content: [] }, session_id: "s1" }),
+      JSON.stringify({ type: "assistant", parent_tool_use_id: null, message: { model: "claude-sonnet-5", content: [] }, session_id: "s1" }),
+      JSON.stringify({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "OK",
+        session_id: "s1",
+        modelUsage: {
+          helper: { canonicalModel: "claude-haiku-4-5", outputTokens: 12 },
+          principal: { canonicalModel: "claude-sonnet-5-20260801", outputTokens: 900 },
+        },
+      }),
+    ].join("\n");
+
+    expect(adapter.parse(stdout, true)).toMatchObject({
+      modelObserved: "claude-sonnet-5",
+      helperModelsObserved: ["claude-haiku-4-5"],
+    });
+  });
+
+  test("uses the unique highest-output model for a usage-only JSON result", () => {
+    const stdout = JSON.stringify({
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      result: "OK",
+      modelUsage: {
+        helper: { canonicalModel: "claude-haiku-4-5", outputTokens: 12 },
+        principal: { canonicalModel: "claude-opus-5", outputTokens: 900 },
+      },
+    });
+
+    expect(adapter.parse(stdout, true)).toMatchObject({
+      modelObserved: "claude-opus-5",
+      helperModelsObserved: ["claude-haiku-4-5"],
+    });
+  });
+
+  test("aggregates duplicate canonical usage before choosing a principal", () => {
+    const stdout = JSON.stringify({
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      result: "OK",
+      modelUsage: {
+        helper: { canonicalModel: "claude-haiku-4-5", outputTokens: 60 },
+        principalAlias: { canonicalModel: "claude-opus-5", outputTokens: 40 },
+        principalDated: { canonicalModel: "claude-opus-5", outputTokens: 40 },
+      },
+    });
+
+    expect(adapter.parse(stdout, true)).toMatchObject({
+      modelObserved: "claude-opus-5",
+      helperModelsObserved: ["claude-haiku-4-5"],
+    });
+  });
+
+  test("omits attribution when usage-only model totals are tied", () => {
+    const stdout = JSON.stringify({
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      result: "OK",
+      modelUsage: {
+        first: { canonicalModel: "claude-haiku-4-5", outputTokens: 12 },
+        second: { canonicalModel: "claude-opus-5", outputTokens: 12 },
+      },
+    });
+
+    const parsed = adapter.parse(stdout, true);
+    expect(parsed.modelObserved).toBeUndefined();
+    expect(parsed.helperModelsObserved).toBeUndefined();
+  });
+
+  test("uses init attribution when no assistant event exists", () => {
+    const stdout = [
+      JSON.stringify({ type: "system", subtype: "init", model: "claude-opus-5" }),
+      JSON.stringify({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "OK",
+        modelUsage: {
+          helper: { canonicalModel: "claude-haiku-4-5", outputTokens: 12 },
+          principal: { canonicalModel: "claude-opus-5", outputTokens: 900 },
+        },
+      }),
+    ].join("\n");
+
+    expect(adapter.parse(stdout, true)).toMatchObject({
+      modelObserved: "claude-opus-5",
+      helperModelsObserved: ["claude-haiku-4-5"],
+    });
+  });
+
+  test("does not match a different version from the same Claude family", () => {
+    const stdout = [
+      JSON.stringify({ type: "system", subtype: "init", model: "claude-opus-5" }),
+      JSON.stringify({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "OK",
+        modelUsage: {
+          olderOpus: { canonicalModel: "claude-opus-4-1", outputTokens: 900 },
+          helper: { canonicalModel: "claude-haiku-4-5", outputTokens: 12 },
+        },
+      }),
+    ].join("\n");
+
+    const parsed = adapter.parse(stdout, true);
+    expect(parsed.modelObserved).toBe("claude-opus-5");
+    expect(parsed.helperModelsObserved).toEqual(["claude-opus-4-1", "claude-haiku-4-5"]);
+  });
 });
 
 describe("CodexAdapter", () => {

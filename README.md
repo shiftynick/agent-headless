@@ -157,6 +157,18 @@ If Cursor rejects the model, the result's `warnings` say so and point at
 supported model list is included, since the caller never chose it.
 No model listing happens on any other path.
 
+### Principal and helper model attribution
+
+`result.modelObserved` identifies the principal model that produced the
+provider response. For Claude structured runs, the top-level assistant stream
+is authoritative, with session initialization and then `modelUsage` as
+fallbacks. Claude may include internal helper models in `modelUsage`; these are
+reported separately in `result.helperModelsObserved` and never replace the
+principal attribution. Callers should use `modelObserved` for independence
+checks and retain `helperModelsObserved` as supporting execution evidence. If a
+usage-only result has no uniquely attributable principal, both fields are
+omitted rather than inferred from object order.
+
 ### Isolated worktrees are always located
 
 Cursor accepts a bare `--worktree` and then names the worktree itself without

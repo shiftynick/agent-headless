@@ -108,7 +108,10 @@ export interface AgentResult {
   exitCode: number | null;
   sessionId?: string;
   modelRequested?: string;
+  /** Principal model that produced the provider's response. */
   modelObserved?: string;
+  /** Internal helper models reported by the provider, excluding the matched principal usage entry. */
+  helperModelsObserved?: string[];
   /**
    * True when the caller named no model and the runner supplied its documented
    * default (Cursor only today). Callers whose correctness depends on an
@@ -206,7 +209,10 @@ export interface ParsedOutput {
   finalText?: string;
   events: AgentEvent[];
   sessionId?: string;
+  /** Principal model that produced the provider's response. */
   modelObserved?: string;
+  /** Internal helper models reported by the provider, excluding the matched principal usage entry. */
+  helperModelsObserved?: string[];
   usage?: AgentUsage;
   protocolError?: string;
   /**
