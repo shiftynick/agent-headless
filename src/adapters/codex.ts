@@ -1,3 +1,5 @@
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { unsupported } from "../errors";
 import { asRecord, numberValue, parseJsonLines } from "../jsonl";
@@ -23,6 +25,54 @@ import {
 
 /** Codex's own terminal markers: exactly one of these ends a well-formed turn. */
 const CODEX_FAILURE_TYPES = ["turn.failed"] as const;
+
+/**
+ * Codex's JSON event stream carries no model field, so the effective model is
+ * recoverable only from the session rollout file, which records it on every
+ * turn_context line. Ephemeral runs persist no rollout; for them attribution
+ * stays honestly absent rather than echoing the request.
+ */
+function observedModelFromRollout(threadId: string, codexHome?: string): string | undefined {
+  try {
+    const root = path.join(
+      codexHome ?? process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex"),
+      "sessions",
+    );
+    if (!existsSync(root)) return undefined;
+    const rollout = findRolloutFile(root, threadId);
+    if (!rollout) return undefined;
+    let model: string | undefined;
+    for (const line of readFileSync(rollout, "utf8").split("\n")) {
+      if (!line.includes('"turn_context"')) continue;
+      try {
+        const record = asRecord(JSON.parse(line));
+        if (record?.type !== "turn_context") continue;
+        const payload = asRecord(record.payload);
+        if (typeof payload?.model === "string") model = payload.model;
+      } catch {
+        // A malformed line invalidates itself, not the rest of the rollout.
+      }
+    }
+    return model;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Rollouts are date-partitioned (YYYY/MM/DD); scan newest-first, bounded. */
+function findRolloutFile(root: string, threadId: string, depth = 0): string | undefined {
+  const entries = readdirSync(root, { withFileTypes: true })
+    .sort((a, b) => b.name.localeCompare(a.name));
+  for (const entry of entries) {
+    const full = path.join(root, entry.name);
+    if (entry.isFile() && entry.name.startsWith("rollout-") && entry.name.includes(threadId)) return full;
+    if (entry.isDirectory() && depth < 3) {
+      const found = findRolloutFile(full, threadId, depth + 1);
+      if (found) return found;
+    }
+  }
+  return undefined;
+}
 
 export class CodexAdapter implements ProviderAdapter {
   readonly provider = "codex" as const;
@@ -141,10 +191,13 @@ export class CodexAdapter implements ProviderAdapter {
     if (outputTokens !== undefined) usage.outputTokens = outputTokens;
     if (reasoningOutputTokens !== undefined) usage.reasoningOutputTokens = reasoningOutputTokens;
     const lastMessage = messages.at(-1);
+    const threadId = typeof startRaw?.thread_id === "string" ? startRaw.thread_id : undefined;
+    const modelObserved = threadId ? observedModelFromRollout(threadId) : undefined;
     return {
       events: parsed.events,
       ...(typeof lastMessage?.text === "string" ? { finalText: lastMessage.text } : {}),
-      ...(typeof startRaw?.thread_id === "string" ? { sessionId: startRaw.thread_id } : {}),
+      ...(threadId ? { sessionId: threadId } : {}),
+      ...(modelObserved ? { modelObserved } : {}),
       ...(Object.keys(usage).length ? { usage } : {}),
       ...warnings,
     };

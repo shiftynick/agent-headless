@@ -1071,3 +1071,57 @@ describe("case-variant duplicates resolve last-wins, matching effectiveEnv", () 
     expect(root).not.toBe("X:\gone");
   });
 });
+
+describe("codex observed model from rollout", () => {
+  const stream = (threadId: string) => [
+    JSON.stringify({ type: "thread.started", thread_id: threadId }),
+    JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "done" } }),
+    JSON.stringify({ type: "turn.completed", usage: { output_tokens: 1 } }),
+  ].join("\n");
+
+  test("modelObserved comes from the rollout's last turn_context", () => {
+    const home = mkdtempSync(path.join(tmpdir(), "ah-codex-home-"));
+    const threadId = "01ffff00-0000-7000-8000-000000000001";
+    try {
+      const day = path.join(home, "sessions", "2026", "08", "19");
+      mkdirSync(day, { recursive: true });
+      writeFileSync(path.join(day, `rollout-2026-08-19T00-00-00-${threadId}.jsonl`), [
+        JSON.stringify({ type: "session_meta", payload: { id: threadId } }),
+        JSON.stringify({ type: "turn_context", payload: { turn_id: "t1", model: "gpt-5.6-sol" } }),
+        "not json at all",
+        JSON.stringify({ type: "turn_context", payload: { turn_id: "t2", model: "gpt-5.6-terra" } }),
+      ].join("\n"));
+      const previous = process.env.CODEX_HOME;
+      process.env.CODEX_HOME = home;
+      try {
+        const parsed = new CodexAdapter().parse(stream(threadId), true);
+        expect(parsed.modelObserved).toBe("gpt-5.6-terra");
+        expect(parsed.sessionId).toBe(threadId);
+      } finally {
+        if (previous === undefined) delete process.env.CODEX_HOME;
+        else process.env.CODEX_HOME = previous;
+      }
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("no rollout (ephemeral run) leaves modelObserved honestly absent", () => {
+    const home = mkdtempSync(path.join(tmpdir(), "ah-codex-home-"));
+    try {
+      mkdirSync(path.join(home, "sessions"), { recursive: true });
+      const previous = process.env.CODEX_HOME;
+      process.env.CODEX_HOME = home;
+      try {
+        const parsed = new CodexAdapter().parse(stream("01ffff00-0000-7000-8000-00000000dead"), true);
+        expect(parsed.modelObserved).toBeUndefined();
+        expect(parsed.finalText).toBe("done");
+      } finally {
+        if (previous === undefined) delete process.env.CODEX_HOME;
+        else process.env.CODEX_HOME = previous;
+      }
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
