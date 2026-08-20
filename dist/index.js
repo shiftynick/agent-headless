@@ -1330,7 +1330,7 @@ function describeWorkspace(request, cwd, events, stdout) {
   };
 }
 // src/version.ts
-var VERSION = "0.6.1";
+var VERSION = "0.6.2";
 
 // src/index.ts
 var MODEL_REJECTION = /(?:unknown|unrecognized|unsupported|invalid|unavailable)\s+model|no\s+such\s+model|model\b[^\n]{0,80}?(?:not\s+(?:found|available|supported|recognized)|does\s+not\s+exist|is\s+invalid|is\s+no\s+longer)/iu;
