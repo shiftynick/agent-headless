@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.2
+
+- Codex structured results now report `modelObserved`, recovered from the
+  session rollout's last `turn_context` line, since Codex's JSON event stream
+  carries no model field. Ephemeral runs persist no rollout, so attribution
+  stays absent rather than echoing the requested model.
+
 ## 0.6.1
 
 - Claude structured results now distinguish the principal response model in

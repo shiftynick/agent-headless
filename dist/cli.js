@@ -621,8 +621,51 @@ class ClaudeAdapter {
 }
 
 // src/adapters/codex.ts
+import { existsSync as existsSync3, readFileSync as readFileSync2, readdirSync } from "node:fs";
+import os from "node:os";
 import path3 from "node:path";
 var CODEX_FAILURE_TYPES = ["turn.failed"];
+function observedModelFromRollout(threadId, codexHome) {
+  try {
+    const root = path3.join(codexHome ?? process.env.CODEX_HOME ?? path3.join(os.homedir(), ".codex"), "sessions");
+    if (!existsSync3(root))
+      return;
+    const rollout = findRolloutFile(root, threadId);
+    if (!rollout)
+      return;
+    let model;
+    for (const line of readFileSync2(rollout, "utf8").split(`
+`)) {
+      if (!line.includes('"turn_context"'))
+        continue;
+      try {
+        const record = asRecord(JSON.parse(line));
+        if (record?.type !== "turn_context")
+          continue;
+        const payload = asRecord(record.payload);
+        if (typeof payload?.model === "string")
+          model = payload.model;
+      } catch {}
+    }
+    return model;
+  } catch {
+    return;
+  }
+}
+function findRolloutFile(root, threadId, depth = 0) {
+  const entries = readdirSync(root, { withFileTypes: true }).sort((a, b) => b.name.localeCompare(a.name));
+  for (const entry of entries) {
+    const full = path3.join(root, entry.name);
+    if (entry.isFile() && entry.name.startsWith("rollout-") && entry.name.includes(threadId))
+      return full;
+    if (entry.isDirectory() && depth < 3) {
+      const found = findRolloutFile(full, threadId, depth + 1);
+      if (found)
+        return found;
+    }
+  }
+  return;
+}
 
 class CodexAdapter {
   provider = "codex";
@@ -738,10 +781,13 @@ class CodexAdapter {
     if (reasoningOutputTokens !== undefined)
       usage.reasoningOutputTokens = reasoningOutputTokens;
     const lastMessage = messages.at(-1);
+    const threadId = typeof startRaw?.thread_id === "string" ? startRaw.thread_id : undefined;
+    const modelObserved = threadId ? observedModelFromRollout(threadId) : undefined;
     return {
       events: parsed.events,
       ...typeof lastMessage?.text === "string" ? { finalText: lastMessage.text } : {},
-      ...typeof startRaw?.thread_id === "string" ? { sessionId: startRaw.thread_id } : {},
+      ...threadId ? { sessionId: threadId } : {},
+      ...modelObserved ? { modelObserved } : {},
       ...Object.keys(usage).length ? { usage } : {},
       ...warnings
     };
@@ -751,7 +797,7 @@ class CodexAdapter {
 // src/adapters/cursor.ts
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync as existsSync3 } from "node:fs";
+import { existsSync as existsSync4 } from "node:fs";
 import { homedir } from "node:os";
 import path4 from "node:path";
 function cursorModel(model, effort) {
@@ -814,7 +860,7 @@ function slugifyRepoName(name) {
 function hasGitAncestor(start) {
   let current = start;
   for (;; ) {
-    if (existsSync3(path4.join(current, ".git")))
+    if (existsSync4(path4.join(current, ".git")))
       return true;
     const parent = path4.dirname(current);
     if (parent === current)
@@ -1175,13 +1221,13 @@ function getAdapter(provider) {
 }
 
 // src/validation.ts
-import { existsSync as existsSync4, realpathSync, statSync } from "node:fs";
+import { existsSync as existsSync5, realpathSync, statSync } from "node:fs";
 function normalizeRequest(request) {
   if (!request.prompt?.trim())
     invalid("prompt must be non-empty");
   if (!request.cwd)
     invalid("cwd is required");
-  if (!existsSync4(request.cwd) || !statSync(request.cwd).isDirectory()) {
+  if (!existsSync5(request.cwd) || !statSync(request.cwd).isDirectory()) {
     invalid(`cwd is not an existing directory: ${request.cwd}`);
   }
   if (request.timeoutMs !== undefined && (!Number.isFinite(request.timeoutMs) || request.timeoutMs <= 0)) {
@@ -1193,7 +1239,7 @@ function normalizeRequest(request) {
   if (request.model !== undefined && !request.model.trim())
     invalid("model must be non-empty");
   const additionalDirs = request.additionalDirs?.map((directory) => {
-    if (!existsSync4(directory) || !statSync(directory).isDirectory()) {
+    if (!existsSync5(directory) || !statSync(directory).isDirectory()) {
       invalid(`additional directory does not exist: ${directory}`);
     }
     return realpathSync(directory);
@@ -1286,7 +1332,7 @@ function describeWorkspace(request, cwd, events, stdout) {
   };
 }
 // src/version.ts
-var VERSION = "0.6.1";
+var VERSION = "0.6.2";
 
 // src/index.ts
 var MODEL_REJECTION = /(?:unknown|unrecognized|unsupported|invalid|unavailable)\s+model|no\s+such\s+model|model\b[^\n]{0,80}?(?:not\s+(?:found|available|supported|recognized)|does\s+not\s+exist|is\s+invalid|is\s+no\s+longer)/iu;
@@ -1429,7 +1475,7 @@ function assertSucceeded(result) {
 }
 
 // src/cli.ts
-import { readFileSync as readFileSync2 } from "node:fs";
+import { readFileSync as readFileSync3 } from "node:fs";
 import process2 from "node:process";
 var help = `agent-headless - one headless interface for Claude, Codex, Cursor, and Antigravity
 
@@ -1576,9 +1622,9 @@ function parseRun(args) {
   if (prompt && promptFile)
     throw new AgentHeadlessError("invalid_request", "--prompt and --prompt-file are mutually exclusive");
   if (promptFile)
-    prompt = readFileSync2(promptFile, "utf8");
+    prompt = readFileSync3(promptFile, "utf8");
   if (!prompt && !process2.stdin.isTTY)
-    prompt = readFileSync2(0, "utf8");
+    prompt = readFileSync3(0, "utf8");
   if (!prompt)
     throw new AgentHeadlessError("invalid_request", "provide --prompt, --prompt-file, or stdin");
   if (effort && !["low", "medium", "high", "xhigh", "max"].includes(effort)) {

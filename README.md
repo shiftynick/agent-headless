@@ -169,6 +169,11 @@ checks and retain `helperModelsObserved` as supporting execution evidence. If a
 usage-only result has no uniquely attributable principal, both fields are
 omitted rather than inferred from object order.
 
+Codex's JSON event stream carries no model field at all, so its `modelObserved`
+is recovered from the session rollout file, which records the effective model
+on every `turn_context` line; the last one wins. Runs that persist no rollout
+report no observed model rather than echoing the requested one.
+
 ### Isolated worktrees are always located
 
 Cursor accepts a bare `--worktree` and then names the worktree itself without
