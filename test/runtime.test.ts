@@ -264,6 +264,52 @@ test("an explicit Cursor model overrides the default and is reported as chosen",
   expect(result.modelDefaulted).toBeFalsy();
 });
 
+test("an off-catalog model is passed through and labelled as unverified", async () => {
+  const options = capturing(cursorSuccess);
+  const result = await runAgent({ ...bareCursor, model: "cursor-grok-5-high" }, options);
+
+  expectFlag(options.args(), "--model", "cursor-grok-5-high");
+  expect(result.status).toBe("succeeded");
+  expect(result.modelRequested).toBe("cursor-grok-5-high");
+  expect(result.modelUncatalogued).toBe(true);
+  expect(result.warnings).toContain(
+    'model "cursor-grok-5-high" is not in agent-headless\'s known cursor catalog; passed through unverified - check modelObserved',
+  );
+});
+
+test("the uncatalogued label reaches the failure path too", async () => {
+  const result = await runAgent(
+    { provider: "codex", prompt: "x", cwd: process.cwd(), model: "gpt-7-nova" },
+    stubbed("", { exitCode: 1, stderr: "codex: unknown model" }),
+  );
+
+  expect(result.status).toBe("failed");
+  expect(result.modelRequested).toBe("gpt-7-nova");
+  expect(result.modelUncatalogued).toBe(true);
+  expect(result.warnings.some((warning) => warning.includes("known codex catalog"))).toBe(true);
+});
+
+test("a catalogued model, a Claude alias, and Antigravity carry no uncatalogued label", async () => {
+  const cursor = await runAgent({ ...bareCursor, model: "cursor-grok-4.6-high" }, stubbed(cursorSuccess));
+  expect(cursor.modelUncatalogued).toBeUndefined();
+
+  const alias = await runAgent(
+    { provider: "claude", prompt: "x", cwd: process.cwd(), model: "fable" },
+    stubbed(JSON.stringify({ type: "result", is_error: false, result: "ok", session_id: "s1" })),
+  );
+  expect(alias.modelUncatalogued).toBeUndefined();
+  expect(alias.warnings).toEqual([]);
+
+  // Antigravity's catalog is read live, so there is nothing here to be off.
+  const antigravity = await runAgent(
+    { provider: "antigravity", prompt: "x", cwd: process.cwd(), model: "gemini-9.9-unreleased" },
+    stubbed("", { exitCode: 1, stderr: "agy exploded" }),
+  );
+  expect(antigravity.status).toBe("failed");
+  expect(antigravity.modelUncatalogued).toBeUndefined();
+  expect(antigravity.warnings).toEqual([]);
+});
+
 test("Claude and Codex get no injected model default", async () => {
   for (const provider of ["claude", "codex"] as const) {
     const options = capturing(

@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.7.0
+
+- Behaviour change: a `--model` / `request.model` that is not in this runner's
+  catalog is now passed to the Claude, Codex, or Cursor CLI unchanged instead of
+  failing before launch. The provider is the authority on its own catalog, so a
+  newly released model no longer needs a release here. Cursor `auto` and Cursor
+  Grok `*-fast` variants are still refused; those are policy, not catalog.
+- New `result.modelUncatalogued` and a matching warning label a run whose
+  effective model this runner does not know, so callers that need exact
+  attribution know to compare `modelRequested` with `modelObserved`.
+  Antigravity, whose catalog is read live, never sets it.
+- `models <provider>` now lists `claude-fable-5-1` and `gpt-6-astra`. The lists
+  are a hint rather than a gate; `SUPPORTED_MODELS` / `supportedModels` keep
+  their names and shape.
+- The Fable low-effort default now applies to the whole Fable family rather than
+  the single `claude-fable-5` ID.
+
 ## 0.6.2
 
 - Codex structured results now report `modelObserved`, recovered from the

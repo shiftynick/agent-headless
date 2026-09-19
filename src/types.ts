@@ -120,6 +120,14 @@ export interface AgentResult {
    * model and so cannot by itself distinguish chosen from defaulted.
    */
   modelDefaulted?: boolean;
+  /**
+   * True when the effective requested model is not in this runner's known
+   * catalog for the provider. The model was still passed to the provider - it,
+   * not this catalog, decides what it accepts - so a caller that needs exact
+   * attribution must compare `modelRequested` with `modelObserved`. Antigravity
+   * has no pinned catalog and so never sets this.
+   */
+  modelUncatalogued?: boolean;
   usage?: AgentUsage;
   warnings: string[];
   /**

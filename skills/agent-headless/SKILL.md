@@ -42,6 +42,10 @@ model catalog, so use it only after its ordinary CLI authentication is ready.
 - Give a specific `--cwd`, named `--model`, and bounded prompt for meaningful
   runs. Preserve the normalized result and check the reported workspace before
   retrying an `unparsed` result.
+- `models <provider>` lists the IDs this runner knows, not the only ones it
+  accepts: an unknown model is passed to the provider CLI and the result reports
+  `modelUncatalogued: true` with a warning. When the model matters, compare
+  `modelObserved` against `modelRequested` instead of trusting the request.
 
 ## Common forms
 
