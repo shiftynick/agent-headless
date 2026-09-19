@@ -918,33 +918,61 @@ describe("protocol validation", () => {
   });
 });
 
-describe("supported model lists", () => {
-  test("each provider exposes its curated allowlist", async () => {
+describe("known model lists", () => {
+  test("each provider exposes the models this runner knows", async () => {
     expect(await new ClaudeAdapter().listModels()).toEqual([...SUPPORTED_MODELS.claude]);
     expect(await new CodexAdapter().listModels()).toEqual([...SUPPORTED_MODELS.codex]);
     expect(await new CursorAdapter().listModels()).toEqual([...SUPPORTED_MODELS.cursor]);
+    expect(SUPPORTED_MODELS.claude).toContain("claude-fable-5-1");
+    expect(SUPPORTED_MODELS.codex).toContain("gpt-6-astra");
     expect(SUPPORTED_MODELS.cursor).toContain("cursor-grok-4.5-medium");
     expect(SUPPORTED_MODELS.cursor).toContain("cursor-grok-4.6-medium");
     expect(SUPPORTED_MODELS.cursor.includes("cursor-grok-4.5-medium-fast" as never)).toBe(false);
   });
 
-  test("Claude Fable defaults to low effort unless the caller sets one", async () => {
+  test("the whole Claude Fable family defaults to low effort", async () => {
     const adapter = new ClaudeAdapter();
-    const prepared = await adapter.prepare(request("claude", { model: "claude-fable-5" }));
-    expect(prepared.effort).toBe("low");
-    expectFlag(adapter.build(prepared).args, "--effort", "low");
+    for (const model of ["fable", "claude-fable-5", "claude-fable-5-1", "claude-fable-6"]) {
+      const prepared = await adapter.prepare(request("claude", { model }));
+      expect(prepared.effort).toBe("low");
+      expectFlag(adapter.build(prepared).args, "--effort", "low");
+    }
 
     const explicit = await adapter.prepare(request("claude", { model: "claude-fable-5", effort: "high" }));
     expect(explicit.effort).toBe("high");
   });
 
-  test("off-list and Grok-fast Cursor models fail closed", async () => {
-    await expect(new CursorAdapter().prepare(request("cursor", { model: "claude-opus-5-thinking-high" })))
-      .rejects.toThrow(/supported list/u);
-    await expect(new CursorAdapter().prepare(request("cursor", { model: "cursor-grok-4.5-high-fast" })))
+  test("an off-catalog model reaches the provider unchanged", async () => {
+    const claude = new ClaudeAdapter();
+    expectFlag(
+      claude.build(await claude.prepare(request("claude", { model: "claude-opus-6" }))).args,
+      "--model",
+      "claude-opus-6",
+    );
+    expectFlag(new CodexAdapter().build(request("codex", { model: "gpt-7-nova" })).args, "--model", "gpt-7-nova");
+    const cursor = new CursorAdapter();
+    expectFlag(
+      cursor.build(await cursor.prepare(request("cursor", { model: "cursor-grok-5-high" }))).args,
+      "--model",
+      "cursor-grok-5-high",
+    );
+  });
+
+  test("an off-catalog Cursor model keeps its ID and takes effort as a parameter", async () => {
+    const cursor = new CursorAdapter();
+    // Only the catalog could name the variant, so `prepare` must not guess one.
+    const prepared = await cursor.prepare(request("cursor", { model: "cursor-grok-5", effort: "high" }));
+    expect(prepared.model).toBe("cursor-grok-5");
+    expectFlag(cursor.build(prepared).args, "--model", "cursor-grok-5[effort=high]");
+  });
+
+  test("the policy refusals outlive the catalog becoming a hint", async () => {
+    const cursor = new CursorAdapter();
+    await expect(cursor.prepare(request("cursor", { model: "cursor-grok-4.5-high-fast" })))
       .rejects.toThrow(/fast variants are not allowed/u);
-    await expect(new CodexAdapter().prepare(request("codex", { model: "gpt-5.5" })))
-      .rejects.toThrow(/supported list/u);
+    // A catalogued base model with no such variant still fails closed.
+    await expect(cursor.prepare(request("cursor", { model: "composer-2.5", effort: "high" })))
+      .rejects.toThrow(/no supported high effort variant/u);
   });
 });
 

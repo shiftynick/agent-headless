@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { unsupported } from "../errors";
 import { asRecord, numberValue, parseJsonLines } from "../jsonl";
-import { assertSupportedModel, isClaudeFable, supportedModels } from "../models";
+import { isClaudeFable, supportedModels } from "../models";
 import { probeExecutable } from "../process";
 import type {
   AgentUsage,
@@ -109,7 +109,6 @@ export class ClaudeAdapter implements ProviderAdapter {
   }
 
   async prepare(request: RunRequest, _options: PrepareOptions = {}): Promise<RunRequest> {
-    if (request.model) assertSupportedModel("claude", request.model);
     if (request.model && isClaudeFable(request.model) && !request.effort) {
       return { ...request, effort: "low" };
     }

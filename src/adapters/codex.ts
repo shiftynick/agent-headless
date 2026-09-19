@@ -3,13 +3,12 @@ import os from "node:os";
 import path from "node:path";
 import { unsupported } from "../errors";
 import { asRecord, numberValue, parseJsonLines } from "../jsonl";
-import { assertSupportedModel, supportedModels } from "../models";
+import { supportedModels } from "../models";
 import { probeExecutable } from "../process";
 import type {
   AgentUsage,
   Invocation,
   ParsedOutput,
-  PrepareOptions,
   ProviderAdapter,
   ProviderCapabilities,
   RunRequest,
@@ -96,11 +95,6 @@ export class CodexAdapter implements ProviderAdapter {
 
   async listModels(): Promise<string[]> {
     return supportedModels("codex");
-  }
-
-  async prepare(request: RunRequest, _options: PrepareOptions = {}): Promise<RunRequest> {
-    if (request.model) assertSupportedModel("codex", request.model);
-    return request;
   }
 
   build(request: RunRequest): Invocation {

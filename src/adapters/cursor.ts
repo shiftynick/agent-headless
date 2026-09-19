@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { unsupported } from "../errors";
-import { assertSupportedModel, supportedModels } from "../models";
+import { checkModel, supportedModels } from "../models";
 import { asRecord, numberValue, parseJsonLines } from "../jsonl";
 import { effectiveEnv, foldEnvName, lastEnvMatch, probeExecutable, resolveCommand } from "../process";
 import type {
@@ -347,8 +347,12 @@ export class CursorAdapter implements ProviderAdapter {
           `Cursor model ${model} has no supported ${request.effort} effort variant; choose an exact model ID`,
         );
       }
+      // An uncatalogued model keeps the ID the caller gave: only the catalog
+      // could say which effort variants exist, so `build` parameterizes it
+      // with `[effort=...]` rather than inventing a variant name.
     }
-    assertSupportedModel("cursor", next.model!);
+    // Only for the Grok-fast refusal; an off-catalog model is passed through.
+    checkModel("cursor", next.model!);
     return withDefaultWorktreeName(next, options.generateWorktreeName ?? generateWorktreeName);
   }
 

@@ -1,6 +1,7 @@
 import { AgentHeadlessError } from "./errors";
 import { CURSOR_DEFAULT_MODEL, getAdapter } from "./adapters";
 import { parseJsonEvent, parseJsonLines } from "./jsonl";
+import { checkModel } from "./models";
 import { runInvocation } from "./process";
 import { envExecutable } from "./adapters/shared";
 import type {
@@ -89,6 +90,13 @@ export async function runAgent(input: RunRequest, options: RunAgentOptions = {})
     });
   }
   const modelDefaulted = !modelChosenByCaller && request.model !== undefined;
+  // The catalog is a hint, so an unknown model reaches the provider; labelling
+  // it here is the only place the caller learns the name went out unverified.
+  const modelUncatalogued = request.model !== undefined
+    && !checkModel(request.provider, request.model).catalogued;
+  const modelWarnings = modelUncatalogued
+    ? [`model "${request.model}" is not in agent-headless's known ${request.provider} catalog; passed through unverified - check modelObserved`]
+    : [];
   const invocation = adapter.build(request);
   const streamWarnings: string[] = [];
   const processResult = await (options.execute ?? runInvocation)(invocation, {
@@ -115,6 +123,7 @@ export async function runAgent(input: RunRequest, options: RunAgentOptions = {})
   const partialEvents = structuredPartial?.events ?? textPartial?.events ?? [];
   const partialFinalText = textPartial?.finalText;
   const partialWarnings = [...new Set([
+    ...modelWarnings,
     ...streamWarnings,
     ...(structuredPartial?.warnings ?? []),
     ...(structuredPartial?.error ? [structuredPartial.error] : []),
@@ -131,6 +140,7 @@ export async function runAgent(input: RunRequest, options: RunAgentOptions = {})
       exitCode: processResult.exitCode,
       ...(request.model ? { modelRequested: request.model } : {}),
       ...(modelDefaulted ? { modelDefaulted: true } : {}),
+      ...(modelUncatalogued ? { modelUncatalogued: true } : {}),
       warnings: partialWarnings,
       workspace: partialWorkspace,
       stderr: processResult.stderr,
@@ -153,6 +163,7 @@ export async function runAgent(input: RunRequest, options: RunAgentOptions = {})
       exitCode: processResult.exitCode,
       ...(request.model ? { modelRequested: request.model } : {}),
       ...(modelDefaulted ? { modelDefaulted: true } : {}),
+      ...(modelUncatalogued ? { modelUncatalogued: true } : {}),
       warnings: [...new Set([...partialWarnings, ...rejection])],
       workspace: partialWorkspace,
       stderr: processResult.stderr,
@@ -166,6 +177,7 @@ export async function runAgent(input: RunRequest, options: RunAgentOptions = {})
     ? await modelRejectionWarnings(request, modelDefaulted, `${parsed.protocolError}\n${processResult.stderr}`, options)
     : [];
   const warnings = [...new Set([
+    ...modelWarnings,
     ...streamWarnings,
     ...(parsed.warnings ?? []),
     ...(parsed.protocolError ? [parsed.protocolError] : []),
@@ -181,6 +193,7 @@ export async function runAgent(input: RunRequest, options: RunAgentOptions = {})
     ...(parsed.sessionId ? { sessionId: parsed.sessionId } : {}),
     ...(request.model ? { modelRequested: request.model } : {}),
     ...(modelDefaulted ? { modelDefaulted: true } : {}),
+    ...(modelUncatalogued ? { modelUncatalogued: true } : {}),
     ...(parsed.modelObserved ? { modelObserved: parsed.modelObserved } : {}),
     ...(parsed.helperModelsObserved?.length ? { helperModelsObserved: parsed.helperModelsObserved } : {}),
     ...(parsed.usage ? { usage: parsed.usage } : {}),

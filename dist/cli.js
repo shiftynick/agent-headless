@@ -1,5 +1,9 @@
 #!/usr/bin/env node
 
+// src/cli.ts
+import { readFileSync as readFileSync3 } from "node:fs";
+import process2 from "node:process";
+
 // src/errors.ts
 class AgentHeadlessError extends Error {
   code;
@@ -95,8 +99,8 @@ function numberValue(value) {
 
 // src/models.ts
 var SUPPORTED_MODELS = Object.freeze({
-  claude: Object.freeze(["claude-fable-5", "claude-opus-5", "claude-sonnet-5"]),
-  codex: Object.freeze(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]),
+  claude: Object.freeze(["claude-fable-5-1", "claude-fable-5", "claude-opus-5", "claude-sonnet-5"]),
+  codex: Object.freeze(["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]),
   cursor: Object.freeze([
     "cursor-grok-4.5-low",
     "cursor-grok-4.5-medium",
@@ -121,29 +125,21 @@ function normalizeClaudeModel(model) {
   return CLAUDE_MODEL_ALIASES[model] ?? model;
 }
 function isClaudeFable(model) {
-  return normalizeClaudeModel(model) === "claude-fable-5";
+  return normalizeClaudeModel(model).startsWith("claude-fable-");
 }
-function assertSupportedModel(provider, model) {
+function checkModel(provider, model) {
   if (provider === "claude") {
-    if (!SUPPORTED_MODELS.claude.includes(normalizeClaudeModel(model))) {
-      unsupported(`Claude model "${model}" is not in the supported list; run \`agent-headless models claude\``);
-    }
-    return;
+    return { catalogued: SUPPORTED_MODELS.claude.includes(normalizeClaudeModel(model)) };
   }
   if (provider === "codex") {
-    if (!SUPPORTED_MODELS.codex.includes(model)) {
-      unsupported(`Codex model "${model}" is not in the supported list; run \`agent-headless models codex\``);
-    }
-    return;
+    return { catalogued: SUPPORTED_MODELS.codex.includes(model) };
   }
   if (provider === "antigravity")
-    return;
+    return { catalogued: true };
   if (/^cursor-grok-.*-fast$/u.test(model)) {
     unsupported(`Cursor Grok fast variants are not allowed; use ${model.replace(/-fast$/u, "")}`);
   }
-  if (!SUPPORTED_MODELS.cursor.includes(model)) {
-    unsupported(`Cursor model "${model}" is not in the supported list; run \`agent-headless models cursor\``);
-  }
+  return { catalogued: SUPPORTED_MODELS.cursor.includes(model) };
 }
 
 // src/process.ts
@@ -494,8 +490,6 @@ class ClaudeAdapter {
     return supportedModels("claude");
   }
   async prepare(request, _options = {}) {
-    if (request.model)
-      assertSupportedModel("claude", request.model);
     if (request.model && isClaudeFable(request.model) && !request.effort) {
       return { ...request, effort: "low" };
     }
@@ -687,11 +681,6 @@ class CodexAdapter {
   }
   async listModels() {
     return supportedModels("codex");
-  }
-  async prepare(request, _options = {}) {
-    if (request.model)
-      assertSupportedModel("codex", request.model);
-    return request;
   }
   build(request) {
     assertAccess(request, ["answer-only", "inspect", "edit-workspace", "inherit-session"]);
@@ -967,7 +956,7 @@ class CursorAdapter {
         unsupported(`Cursor model ${model} has no supported ${request.effort} effort variant; choose an exact model ID`);
       }
     }
-    assertSupportedModel("cursor", next.model);
+    checkModel("cursor", next.model);
     return withDefaultWorktreeName(next, options.generateWorktreeName ?? generateWorktreeName);
   }
   build(request) {
@@ -1332,7 +1321,7 @@ function describeWorkspace(request, cwd, events, stdout) {
   };
 }
 // src/version.ts
-var VERSION = "0.6.2";
+var VERSION = "0.7.0";
 
 // src/index.ts
 var MODEL_REJECTION = /(?:unknown|unrecognized|unsupported|invalid|unavailable)\s+model|no\s+such\s+model|model\b[^\n]{0,80}?(?:not\s+(?:found|available|supported|recognized)|does\s+not\s+exist|is\s+invalid|is\s+no\s+longer)/iu;
@@ -1367,6 +1356,8 @@ async function runAgent(input, options = {}) {
     });
   }
   const modelDefaulted = !modelChosenByCaller && request.model !== undefined;
+  const modelUncatalogued = request.model !== undefined && !checkModel(request.provider, request.model).catalogued;
+  const modelWarnings = modelUncatalogued ? [`model "${request.model}" is not in agent-headless's known ${request.provider} catalog; passed through unverified - check modelObserved`] : [];
   const invocation = adapter.build(request);
   const streamWarnings = [];
   const processResult = await (options.execute ?? runInvocation)(invocation, {
@@ -1388,6 +1379,7 @@ async function runAgent(input, options = {}) {
   const partialEvents = structuredPartial?.events ?? textPartial?.events ?? [];
   const partialFinalText = textPartial?.finalText;
   const partialWarnings = [...new Set([
+    ...modelWarnings,
     ...streamWarnings,
     ...structuredPartial?.warnings ?? [],
     ...structuredPartial?.error ? [structuredPartial.error] : []
@@ -1402,6 +1394,7 @@ async function runAgent(input, options = {}) {
       exitCode: processResult.exitCode,
       ...request.model ? { modelRequested: request.model } : {},
       ...modelDefaulted ? { modelDefaulted: true } : {},
+      ...modelUncatalogued ? { modelUncatalogued: true } : {},
       warnings: partialWarnings,
       workspace: partialWorkspace,
       stderr: processResult.stderr,
@@ -1409,7 +1402,7 @@ async function runAgent(input, options = {}) {
     };
   }
   if (processResult.exitCode !== 0) {
-    const rejection2 = await modelRejectionWarnings(request, modelDefaulted, `${processResult.stderr}
+    const rejection = await modelRejectionWarnings(request, modelDefaulted, `${processResult.stderr}
 ${processResult.stdout}`, options);
     return {
       provider: request.provider,
@@ -1419,7 +1412,8 @@ ${processResult.stdout}`, options);
       exitCode: processResult.exitCode,
       ...request.model ? { modelRequested: request.model } : {},
       ...modelDefaulted ? { modelDefaulted: true } : {},
-      warnings: [...new Set([...partialWarnings, ...rejection2])],
+      ...modelUncatalogued ? { modelUncatalogued: true } : {},
+      warnings: [...new Set([...partialWarnings, ...rejection])],
       workspace: partialWorkspace,
       stderr: processResult.stderr,
       durationMs: processResult.durationMs
@@ -1432,6 +1426,7 @@ ${processResult.stdout}`, options);
   const rejection = parsed.protocolError ? await modelRejectionWarnings(request, modelDefaulted, `${parsed.protocolError}
 ${processResult.stderr}`, options) : [];
   const warnings = [...new Set([
+    ...modelWarnings,
     ...streamWarnings,
     ...parsed.warnings ?? [],
     ...parsed.protocolError ? [parsed.protocolError] : [],
@@ -1446,6 +1441,7 @@ ${processResult.stderr}`, options) : [];
     ...parsed.sessionId ? { sessionId: parsed.sessionId } : {},
     ...request.model ? { modelRequested: request.model } : {},
     ...modelDefaulted ? { modelDefaulted: true } : {},
+    ...modelUncatalogued ? { modelUncatalogued: true } : {},
     ...parsed.modelObserved ? { modelObserved: parsed.modelObserved } : {},
     ...parsed.helperModelsObserved?.length ? { helperModelsObserved: parsed.helperModelsObserved } : {},
     ...parsed.usage ? { usage: parsed.usage } : {},
@@ -1475,8 +1471,6 @@ function assertSucceeded(result) {
 }
 
 // src/cli.ts
-import { readFileSync as readFileSync3 } from "node:fs";
-import process2 from "node:process";
 var help = `agent-headless - one headless interface for Claude, Codex, Cursor, and Antigravity
 
 Usage:

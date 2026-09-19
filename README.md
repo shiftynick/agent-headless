@@ -137,6 +137,31 @@ mode, and for isolated runs the `worktreeName` the runner pinned, the
 See [Isolated worktrees are always located](#isolated-worktrees-are-always-located)
 for where that path comes from and when it can still be absent.
 
+### The model catalog is a hint, not a gate
+
+`agent-headless models <provider>` prints the model IDs this runner knows about,
+and `SUPPORTED_MODELS` / `supportedModels` expose the same lists. A model that is
+not on a list is still passed to the provider CLI unchanged: the provider is the
+authority on its own catalog, so a model released after this package does not
+need a release here or a downstream patch. If the provider does not accept the
+name, the run fails normally with the provider's own message.
+
+Two refusals are policy rather than catalog and still fail before launch:
+Cursor's `auto`, which names no accountable model, and Cursor Grok `*-fast`
+variants.
+
+An off-catalog run is labelled rather than quietly trusted. `result.modelUncatalogued`
+is `true` and `result.warnings` carries `model "<id>" is not in agent-headless's
+known <provider> catalog; passed through unverified - check modelObserved`.
+Claude's `fable` / `opus` / `sonnet` aliases count as catalogued, and Antigravity -
+whose catalog is read live through `agy models` - never sets the flag.
+
+Because the requested ID is no longer checked against anything, a caller that
+needs exact attribution must compare `result.modelRequested` with
+`result.modelObserved` rather than trusting what it asked for. Runs that persist
+no rollout - ephemeral Codex runs - report no `modelObserved` at all, so an
+uncatalogued model on that path is unverifiable from the result alone.
+
 ### Cursor's default model
 
 Cursor no longer requires an explicit model. When a request names none, the
@@ -270,7 +295,9 @@ do not delegate the write when that residual risk is unacceptable.
 For Cursor, `effort` resolves to an available exact model variant such as
 `gpt-5.6-terra-low`; it is not blindly appended to the model ID. If the
 selected model family has no requested effort variant, the run fails before
-model invocation and asks for an exact model ID.
+model invocation and asks for an exact model ID. That resolution reads the
+catalog, so an off-catalog Cursor model keeps the ID the caller gave and
+receives the effort as a `[effort=...]` parameter instead.
 
 ## Development
 
