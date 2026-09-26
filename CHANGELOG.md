@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.0 — 2026-09-26
 
 - Handle early stdin closure without crashing the caller; forward CLI stop
   signals and finish process-tree cleanup even when the provider leader exits.
@@ -14,7 +14,6 @@
   overflow, and decode structured events incrementally without reparsing them.
 - Detect optional capabilities from installed CLI help. Add Linux/Windows CI,
   native process regression tests, and versioned provider protocol fixtures.
-
 - CLI `run` and `doctor` report newer stable package versions on stderr using
   a cached, time-bounded npm check. JSON runs include structured `update`
   metadata; `check-updates [--force]` exposes a standalone JSON check.

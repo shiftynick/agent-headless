@@ -1536,7 +1536,7 @@ import path6 from "node:path";
 import { randomUUID as randomUUID2 } from "node:crypto";
 
 // src/version.ts
-var VERSION = "0.7.0";
+var VERSION = "0.8.0";
 
 // src/updates.ts
 var REGISTRY_URL = "https://registry.npmjs.org/agent-headless/latest";
