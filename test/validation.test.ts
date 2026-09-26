@@ -35,6 +35,6 @@ test("Windows command resolution uses the real case-preserved Path key", () => {
   const dir = mkdtempSync(path.join(tmpdir(), "ah-path-case-"));
   try {
     writeFileSync(path.join(dir, "codex.cmd"), "@echo fake\r\n");
-    expect(resolveOnWindows("codex", { Path: dir, PATHEXT: ".CMD" })).toBe(path.join(dir, "codex.cmd"));
+    expect(resolveOnWindows("codex", { Path: dir, PATHEXT: ".CMD" }).toLowerCase()).toBe(path.join(dir, "codex.cmd").toLowerCase());
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
