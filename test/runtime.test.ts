@@ -89,7 +89,7 @@ const isolatedCursor: RunRequest = {
 };
 
 const cursorSuccess = [
-  JSON.stringify({ type: "system", subtype: "init", session_id: "c1", model: "cursor-grok-4.5-medium", cwd: "/repo/.worktrees/task-018" }),
+  JSON.stringify({ type: "system", subtype: "init", session_id: "c1", model: "cursor-grok-4.5-medium", cwd: path.resolve("/repo/.worktrees/task-018") }),
   JSON.stringify({ type: "assistant", subtype: "message", content: "working" }),
   JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "done", session_id: "c1" }),
 ].join("\n");
@@ -133,7 +133,7 @@ test("every outcome reports where the work went", async () => {
   expect(succeeded.workspace).toMatchObject({
     cwd: process.cwd(),
     access: "edit-isolated",
-    worktree: "/repo/.worktrees/task-018",
+    worktree: path.resolve("/repo/.worktrees/task-018"),
     worktreeName: "task-018",
     worktreeBase: "main",
   });
@@ -154,11 +154,11 @@ test("every outcome reports where the work went", async () => {
 test("an unreadable isolated stream still surfaces a worktree path printed in raw text", async () => {
   const result = await runAgent(
     isolatedCursor,
-    stubbed('preparing worktree {"worktree_path":"/repo/.worktrees/task-018"} ...\nstill not jsonl'),
+    stubbed(`preparing worktree ${JSON.stringify({ worktree_path: path.resolve("/repo/.worktrees/task-018") })} ...\nstill not jsonl`),
   );
 
   expect(result.status).toBe("unparsed");
-  expect(result.workspace?.worktree).toBe("/repo/.worktrees/task-018");
+  expect(result.workspace?.worktree).toBe(path.resolve("/repo/.worktrees/task-018"));
 });
 
 test("an explicit provider failure on a clean exit is failed, not unparsed", async () => {
@@ -307,7 +307,7 @@ test("a catalogued model, a Claude alias, and Antigravity carry no uncatalogued 
   );
   expect(antigravity.status).toBe("failed");
   expect(antigravity.modelUncatalogued).toBeUndefined();
-  expect(antigravity.warnings).toEqual([]);
+  expect(antigravity.warnings.some((warning) => warning.includes("known antigravity catalog"))).toBe(false);
 });
 
 test("Claude and Codex get no injected model default", async () => {
@@ -542,7 +542,7 @@ test("a worktree path the provider discloses beats the derived one", async () =>
   const result = await runAgent(isolatedCursor, stubbed(cursorSuccess));
 
   // The provider is authoritative about where it actually put the work.
-  expect(result.workspace.worktree).toBe("/repo/.worktrees/task-018");
+  expect(result.workspace.worktree).toBe(path.resolve("/repo/.worktrees/task-018"));
   expect(result.workspace.worktreeSource).toBe("reported");
   expect(result.workspace.worktree).not.toBe(cursorWorktreeLocation(process.cwd(), "task-018"));
   // No root is claimed for a path whose layout the runner did not choose.
@@ -567,7 +567,7 @@ test("a disclosed path is reported only once it is absolute", async () => {
 
   // An already-absolute disclosure is still authoritative and untouched.
   const absolute = await runAgent(isolatedCursor, stubbed(cursorSuccess));
-  expect(absolute.workspace.worktree).toBe("/repo/.worktrees/task-018");
+  expect(absolute.workspace.worktree).toBe(path.resolve("/repo/.worktrees/task-018"));
   expect(path.isAbsolute(absolute.workspace.worktree!)).toBe(true);
 });
 

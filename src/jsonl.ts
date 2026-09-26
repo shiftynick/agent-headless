@@ -42,30 +42,46 @@ export interface JsonLinesResult {
  * truncated trailing line can never discard a provider's real events.
  */
 export function parseJsonLines(provider: Provider, stdout: string): JsonLinesResult {
-  const events: AgentEvent[] = [];
-  const warnings: string[] = [];
-  let skipped = 0;
-  const lines = stdout.split(/\r?\n/u).filter((line) => line.trim());
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index]!;
+  const parser = new JsonLineParser(provider);
+  for (const line of stdout.split(/\r?\n/u)) parser.push(line);
+  return parser.result();
+}
+
+/** Incremental JSONL decoder; input retention is bounded by the process runner. */
+export class JsonLineParser {
+  private events: AgentEvent[] = [];
+  private warnings: string[] = [];
+  private skipped = 0;
+  private lineNumber = 0;
+  constructor(private provider: Provider) {}
+
+  push(line: string): AgentEvent | undefined {
+    this.lineNumber++;
+    if (!line.trim()) return undefined;
     try {
-      events.push(parseJsonEvent(provider, line));
+      const event = parseJsonEvent(this.provider, line);
+      this.events.push(event);
+      return event;
     } catch {
-      skipped += 1;
-      if (warnings.length < MAX_JSONL_WARNINGS) warnings.push(`skipped unparseable JSONL at line ${index + 1}`);
+      this.skipped++;
+      if (this.warnings.length < MAX_JSONL_WARNINGS) this.warnings.push(`skipped unparseable JSONL at line ${this.lineNumber}`);
+      return undefined;
     }
   }
-  if (skipped > warnings.length) {
-    warnings.push(`skipped ${skipped} unparseable JSONL lines in total (${warnings.length} listed)`);
+
+  result(): JsonLinesResult {
+    const warnings = [...this.warnings];
+    if (this.skipped > warnings.length) warnings.push(`skipped ${this.skipped} unparseable JSONL lines in total (${warnings.length} listed)`);
+    return { events: this.events, warnings,
+      ...(!this.events.length && this.skipped > 0
+        ? { error: `invalid JSONL: no parseable lines in ${this.skipped} line(s) of provider output` } : {}),
+    };
   }
-  if (!events.length && skipped > 0) {
-    return { events, warnings, error: `invalid JSONL: no parseable lines in ${skipped} line(s) of provider output` };
-  }
-  return { events, warnings };
 }
 
 export function parseJsonEvent(provider: Provider, line: string): AgentEvent {
-  const raw = JSON.parse(line) as Record<string, unknown>;
+  const raw = asRecord(JSON.parse(line));
+  if (!raw) throw new Error("event must be an object");
   const rawType = typeof raw.type === "string"
     ? raw.type
     : provider === "antigravity" && typeof raw.event === "string"

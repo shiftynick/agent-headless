@@ -26,6 +26,11 @@ export type TerminalMarker = {
 export declare function findTerminalMarker(events: AgentEvent[], isSuccess: (event: AgentEvent) => boolean, extraFailureTypes?: readonly string[]): TerminalMarker | undefined;
 /** Carries the provider's own wording out of a failure event, when it has any. */
 export declare function providerFailureMessage(label: string, event: AgentEvent): string;
+/** Session identity remains useful even when no terminal result was produced. */
+export declare function recoveryMetadata(events: AgentEvent[]): Pick<ParsedOutput, "sessionId" | "modelObserved">;
+export declare function rejectUnsupportedFork(request: RunRequest): void;
+/** Read-only feature evidence from the selected executable, never an authenticated run. */
+export declare function executableFeatures(provider: Provider, command: string, args?: string[]): Promise<string[]>;
 export declare function envExecutable(provider: Provider, requestEnv?: Record<string, string | undefined>): string;
 export declare function assertAccess(request: RunRequest, allowed: string[]): void;
 export declare function assertSession(request: RunRequest, allowed: Array<SessionMode["mode"]>): void;

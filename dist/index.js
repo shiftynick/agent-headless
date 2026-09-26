@@ -55,30 +55,51 @@ function eventKind(provider, type, raw) {
 }
 var MAX_JSONL_WARNINGS = 5;
 function parseJsonLines(provider, stdout) {
-  const events = [];
-  const warnings = [];
-  let skipped = 0;
-  const lines = stdout.split(/\r?\n/u).filter((line) => line.trim());
-  for (let index = 0;index < lines.length; index += 1) {
-    const line = lines[index];
+  const parser = new JsonLineParser(provider);
+  for (const line of stdout.split(/\r?\n/u))
+    parser.push(line);
+  return parser.result();
+}
+
+class JsonLineParser {
+  provider;
+  events = [];
+  warnings = [];
+  skipped = 0;
+  lineNumber = 0;
+  constructor(provider) {
+    this.provider = provider;
+  }
+  push(line) {
+    this.lineNumber++;
+    if (!line.trim())
+      return;
     try {
-      events.push(parseJsonEvent(provider, line));
+      const event = parseJsonEvent(this.provider, line);
+      this.events.push(event);
+      return event;
     } catch {
-      skipped += 1;
-      if (warnings.length < MAX_JSONL_WARNINGS)
-        warnings.push(`skipped unparseable JSONL at line ${index + 1}`);
+      this.skipped++;
+      if (this.warnings.length < MAX_JSONL_WARNINGS)
+        this.warnings.push(`skipped unparseable JSONL at line ${this.lineNumber}`);
+      return;
     }
   }
-  if (skipped > warnings.length) {
-    warnings.push(`skipped ${skipped} unparseable JSONL lines in total (${warnings.length} listed)`);
+  result() {
+    const warnings = [...this.warnings];
+    if (this.skipped > warnings.length)
+      warnings.push(`skipped ${this.skipped} unparseable JSONL lines in total (${warnings.length} listed)`);
+    return {
+      events: this.events,
+      warnings,
+      ...!this.events.length && this.skipped > 0 ? { error: `invalid JSONL: no parseable lines in ${this.skipped} line(s) of provider output` } : {}
+    };
   }
-  if (!events.length && skipped > 0) {
-    return { events, warnings, error: `invalid JSONL: no parseable lines in ${skipped} line(s) of provider output` };
-  }
-  return { events, warnings };
 }
 function parseJsonEvent(provider, line) {
-  const raw = JSON.parse(line);
+  const raw = asRecord(JSON.parse(line));
+  if (!raw)
+    throw new Error("event must be an object");
   const rawType = typeof raw.type === "string" ? raw.type : provider === "antigravity" && typeof raw.event === "string" ? raw.event : "unknown";
   const subtype = typeof raw.subtype === "string" ? `.${raw.subtype}` : "";
   const type = `${rawType}${subtype}`;
@@ -136,10 +157,25 @@ function checkModel(provider, model) {
   return { catalogued: SUPPORTED_MODELS.cursor.includes(model) };
 }
 
+// src/adapters/cursor.ts
+import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { existsSync as existsSync3 } from "node:fs";
+import { homedir } from "node:os";
+import path3 from "node:path";
+
 // src/process.ts
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
+var DEFAULT_OUTPUT_LIMITS = Object.freeze({
+  stdoutBytes: 16 * 1024 * 1024,
+  stderrBytes: 1024 * 1024
+});
+function utf8Prefix(value, bytes) {
+  return new StringDecoder("utf8").write(Buffer.from(value).subarray(0, bytes));
+}
 function foldEnvName(name) {
   return process.platform === "win32" ? name.toLowerCase() : name;
 }
@@ -207,6 +243,12 @@ function quoteCmd(value) {
 }
 async function runInvocation(invocation, options) {
   const started = Date.now();
+  const limits = { ...DEFAULT_OUTPUT_LIMITS, ...options.outputLimits };
+  for (const value of Object.values(limits)) {
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new AgentHeadlessError("invalid_request", "output limits must be positive safe integers");
+    }
+  }
   if (options.signal?.aborted) {
     return { stdout: "", stderr: "", exitCode: null, durationMs: 0, timedOut: false, cancelled: true };
   }
@@ -218,6 +260,14 @@ async function runInvocation(invocation, options) {
     let timedOut = false;
     let cancelled = false;
     let pendingLine = "";
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let outputLimitExceeded;
+    let inputError;
+    let closed = false;
+    let exitCode = null;
+    let cleanupDone = false;
+    let settled = false;
     const child = spawn(command, args, {
       cwd: invocation.cwd,
       env,
@@ -228,29 +278,91 @@ async function runInvocation(invocation, options) {
     });
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
+    const deliverLine = (line) => {
+      if (!line.trim())
+        return;
+      try {
+        options.onStdoutLine?.(line);
+      } catch (error) {
+        inputError = `stdout callback failed: ${error instanceof Error ? error.message : String(error)}`;
+        terminate();
+      }
+    };
+    const retain = (chunk, stream) => {
+      const used = stream === "stdout" ? stdoutBytes : stderrBytes;
+      const limit = stream === "stdout" ? limits.stdoutBytes : limits.stderrBytes;
+      const bytes = Buffer.byteLength(chunk);
+      const remaining = Math.max(0, limit - used);
+      if (stream === "stdout")
+        stdoutBytes += bytes;
+      else
+        stderrBytes += bytes;
+      if (bytes <= remaining)
+        return chunk;
+      outputLimitExceeded ??= stream;
+      terminate();
+      return utf8Prefix(chunk, remaining);
+    };
     child.stdout.on("data", (chunk) => {
+      chunk = retain(chunk, "stdout");
       stdout += chunk;
       if (options.onStdoutLine) {
         pendingLine += chunk;
         const lines = pendingLine.split(/\r?\n/u);
         pendingLine = lines.pop() ?? "";
         for (const line of lines)
-          if (line.trim())
-            options.onStdoutLine(line);
+          deliverLine(line);
       }
     });
     child.stderr.on("data", (chunk) => {
-      stderr += chunk;
+      stderr += retain(chunk, "stderr");
     });
     let terminationRequested = false;
     let forceTimer;
-    const forceKill = () => {
-      if (!child.pid)
+    const finish = () => {
+      if (settled || !closed || terminationRequested && !cleanupDone)
         return;
+      settled = true;
+      clearTimeout(timer);
+      if (forceTimer)
+        clearTimeout(forceTimer);
+      options.signal?.removeEventListener("abort", abort);
+      resolve({
+        stdout,
+        stderr,
+        exitCode,
+        durationMs: Date.now() - started,
+        timedOut,
+        cancelled,
+        ...outputLimitExceeded ? { outputLimitExceeded } : {},
+        ...inputError ? { inputError } : {}
+      });
+    };
+    const forceKill = () => {
+      if (!child.pid) {
+        cleanupDone = true;
+        finish();
+        return;
+      }
       if (process.platform === "win32") {
         const killer = spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], { windowsHide: true });
+        const deadline = setTimeout(() => {
+          killer.kill();
+          child.kill();
+        }, 5000);
+        const complete = () => {
+          clearTimeout(deadline);
+          cleanupDone = true;
+          finish();
+        };
         killer.on("error", () => {
           child.kill();
+          complete();
+        });
+        killer.on("close", (code) => {
+          if (code !== 0)
+            child.kill();
+          complete();
         });
       } else {
         try {
@@ -258,12 +370,15 @@ async function runInvocation(invocation, options) {
         } catch {
           child.kill("SIGKILL");
         }
+        cleanupDone = true;
+        finish();
       }
     };
     const terminate = () => {
       if (terminationRequested)
         return;
       terminationRequested = true;
+      clearTimeout(timer);
       if (process.platform === "win32" && child.pid) {
         forceKill();
       } else if (child.pid) {
@@ -273,9 +388,9 @@ async function runInvocation(invocation, options) {
           child.kill("SIGTERM");
         }
         forceTimer = setTimeout(forceKill, 2000);
-        forceTimer.unref();
       } else {
         child.kill("SIGTERM");
+        cleanupDone = true;
       }
     };
     const timer = setTimeout(() => {
@@ -289,8 +404,13 @@ async function runInvocation(invocation, options) {
     options.signal?.addEventListener("abort", abort, { once: true });
     if (options.signal?.aborted)
       abort();
-    child.stdin.end(invocation.stdin, "utf8");
+    child.stdin.on("error", (error) => {
+      inputError = `provider stdin ${error.code ?? "error"}: ${error.message}`;
+      if (error.code !== "EPIPE" && error.code !== "ERR_STREAM_DESTROYED")
+        terminate();
+    });
     child.on("error", (error) => {
+      settled = true;
       clearTimeout(timer);
       if (forceTimer)
         clearTimeout(forceTimer);
@@ -301,15 +421,21 @@ async function runInvocation(invocation, options) {
         reject(new AgentHeadlessError("provider_failed", `Unable to start ${invocation.provider}: ${error.message}`, { cause: error }));
       }
     });
-    child.on("close", (exitCode) => {
-      clearTimeout(timer);
-      if (forceTimer)
-        clearTimeout(forceTimer);
-      options.signal?.removeEventListener("abort", abort);
-      if (options.onStdoutLine && pendingLine.trim())
-        options.onStdoutLine(pendingLine);
-      resolve({ stdout, stderr, exitCode, durationMs: Date.now() - started, timedOut, cancelled });
+    child.on("close", (code) => {
+      closed = true;
+      exitCode = code;
+      if (pendingLine.trim())
+        deliverLine(pendingLine);
+      if (terminationRequested && process.platform !== "win32" && child.pid) {
+        try {
+          process.kill(-child.pid, 0);
+        } catch {
+          cleanupDone = true;
+        }
+      }
+      finish();
     });
+    child.stdin.end(invocation.stdin, "utf8");
   });
 }
 async function probeExecutable(provider, command, cwd) {
@@ -360,10 +486,53 @@ function providerFailureMessage(label, event) {
     raw?.message,
     raw?.error,
     raw?.reason,
+    raw?.result,
+    Array.isArray(raw?.errors) ? raw.errors.join("; ") : undefined,
     asRecord(raw?.item)?.message
   ];
   const detail = candidates.find((value) => typeof value === "string" && value.trim());
   return `${label} reported ${event.type}${typeof detail === "string" ? `: ${detail.trim()}` : ""}`;
+}
+function recoveryMetadata(events) {
+  let sessionId;
+  let modelObserved;
+  for (const event of events) {
+    const raw = asRecord(event.raw);
+    if (!raw || raw.isSidechain === true || raw.parent_tool_use_id != null)
+      continue;
+    const session = event.kind === "session";
+    const result = event.kind === "result" || raw.type === "result";
+    if (session || result) {
+      const nested = asRecord(raw.result);
+      const id = raw.session_id ?? raw.thread_id ?? raw.conversation_id ?? nested?.conversation_id;
+      if (typeof id === "string" && id)
+        sessionId = id;
+    }
+    const model = session ? raw.model ?? asRecord(raw.init)?.model : raw.type === "assistant" ? asRecord(raw.message)?.model : undefined;
+    if (typeof model === "string" && model)
+      modelObserved = model;
+  }
+  return { ...sessionId ? { sessionId } : {}, ...modelObserved ? { modelObserved } : {} };
+}
+function rejectUnsupportedFork(request) {
+  if (request.session?.mode === "resume" && request.session.fork) {
+    unsupported(`${request.provider} does not support forking a session`);
+  }
+}
+async function executableFeatures(provider, command, args = ["--help"]) {
+  try {
+    const result = await runInvocation({ provider, command, args, cwd: process.cwd(), stdin: "", structured: false }, { timeoutMs: 1e4 });
+    if (result.exitCode !== 0 || result.timedOut || result.outputLimitExceeded)
+      return [];
+    const help = `${result.stdout}
+${result.stderr}`;
+    const features = [...new Set(help.match(/--[a-z][a-z-]+\b/gu) ?? [])];
+    if (/^\s+fork\s/mu.test(help))
+      features.push("fork");
+    return features;
+  } catch {
+    return [];
+  }
 }
 function envExecutable(provider, requestEnv) {
   const key = provider === "claude" ? "CLAUDE_BIN" : provider === "codex" ? "CODEX_BIN" : provider === "cursor" ? "CURSOR_AGENT_BIN" : "AGY_BIN";
@@ -399,6 +568,270 @@ function providerFailure(provider, exitCode, stderr) {
 `);
   return new AgentHeadlessError("provider_failed", `${provider} failed with exit code ${String(exitCode)}${detail ? `:
 ${detail}` : ""}`);
+}
+
+// src/adapters/cursor.ts
+function cursorModel(model, effort) {
+  if (!effort)
+    return model;
+  const suffix = model.match(/-(none|low|medium|high|xhigh|max|extra-high)(?:-fast)?$/u)?.[1];
+  if (suffix === effort || effort === "xhigh" && suffix === "extra-high")
+    return model;
+  const match = model.match(/^(.*)\[([^\]]*)\]$/u);
+  if (!match)
+    return `${model}[effort=${effort}]`;
+  const parameters = match[2];
+  const existing = parameters.match(/(?:^|,)effort=([^,]+)/u)?.[1];
+  if (existing === effort)
+    return model;
+  if (existing)
+    return `${match[1]}[${parameters.replace(/(^|,)effort=[^,]+/u, `$1effort=${effort}`)}]`;
+  return `${match[1]}[${parameters}${parameters ? "," : ""}effort=${effort}]`;
+}
+var CURSOR_DEFAULT_MODEL = "cursor-grok-4.6-medium";
+var WORKTREE_NAME_PREFIX = "agent-headless";
+function generateWorktreeName() {
+  return `${WORKTREE_NAME_PREFIX}-${Date.now().toString(36)}-${randomUUID().replace(/-/gu, "").slice(0, 12)}`;
+}
+function withDefaultWorktreeName(request, generate) {
+  if (request.access !== "edit-isolated")
+    return request;
+  const cursor = request.providerOptions?.cursor;
+  if (cursor?.worktreeName)
+    return request;
+  return {
+    ...request,
+    providerOptions: {
+      ...request.providerOptions,
+      cursor: { ...cursor, worktreeName: generate() }
+    }
+  };
+}
+var CURSOR_WORKTREES_ROOT_ENV = "CURSOR_WORKTREES_ROOT";
+var CURSOR_WORKTREE_NAME_PATTERN = /^[A-Za-z0-9._-]+$/u;
+function childEnvValue(name, env) {
+  const { matched, value } = lastEnvMatch(env ?? {}, name);
+  return matched ? value : process.env[name];
+}
+function cursorWorktreesRoot(env) {
+  const configured = childEnvValue(CURSOR_WORKTREES_ROOT_ENV, env);
+  if (configured !== undefined)
+    return configured;
+  try {
+    const home = homedir();
+    return home ? path3.join(home, ".cursor", "worktrees") : undefined;
+  } catch {
+    return;
+  }
+}
+function slugifyRepoName(name) {
+  const slug = name.toLowerCase().replace(/[^a-z0-9._-]+/gu, "-").replace(/-+/gu, "-").replace(/^-+|-+$/gu, "");
+  return slug || "worktree";
+}
+function hasGitAncestor(start) {
+  let current = start;
+  for (;; ) {
+    if (existsSync3(path3.join(current, ".git")))
+      return true;
+    const parent = path3.dirname(current);
+    if (parent === current)
+      return false;
+    current = parent;
+  }
+}
+function gitToplevel(cwd, env) {
+  try {
+    const childEnv = effectiveEnv(env);
+    const resolved = resolveCommand("git", ["rev-parse", "--show-toplevel"], childEnv);
+    const result = spawnSync(resolved.command, resolved.args, {
+      cwd,
+      env: childEnv,
+      encoding: "utf8",
+      windowsHide: true,
+      windowsVerbatimArguments: resolved.windowsVerbatimArguments,
+      timeout: 1e4
+    });
+    if (result.error || result.status !== 0)
+      return;
+    const toplevel = result.stdout.trim();
+    return toplevel ? path3.resolve(toplevel) : undefined;
+  } catch {
+    return;
+  }
+}
+function envKeyPart(env) {
+  if (!env)
+    return null;
+  const names = [...new Set(Object.keys(env).map(foldEnvName))].sort();
+  return names.map((name) => {
+    const { value } = lastEnvMatch(env, name);
+    return value === undefined ? [name] : [name, value];
+  });
+}
+var repoSlugCache = new Map;
+function repoSlugKey(cwd, env) {
+  return JSON.stringify([cwd, envKeyPart(env)]);
+}
+function cursorRepoSlug(cwd, env) {
+  const start = path3.resolve(cwd);
+  const key = repoSlugKey(start, env);
+  const cached = repoSlugCache.get(key);
+  if (cached !== undefined || repoSlugCache.has(key))
+    return cached;
+  const toplevel = hasGitAncestor(start) ? gitToplevel(start, env) : undefined;
+  const slug = toplevel === undefined ? undefined : slugifyRepoName(path3.basename(toplevel));
+  repoSlugCache.set(key, slug);
+  return slug;
+}
+function cursorWorktreePath(request, cwd = request.cwd, env = request.env) {
+  if (request.provider !== "cursor" || request.access !== "edit-isolated")
+    return;
+  const name = request.providerOptions?.cursor?.worktreeName;
+  if (!name || !CURSOR_WORKTREE_NAME_PATTERN.test(name))
+    return;
+  const root = cursorWorktreesRoot(env);
+  const slug = cursorRepoSlug(cwd, env);
+  if (root === undefined || slug === undefined)
+    return;
+  return path3.resolve(cwd, root, slug, name);
+}
+function modelWithEffort(model, effort) {
+  const fast = model.endsWith("-fast") ? "-fast" : "";
+  const withoutFast = fast ? model.slice(0, -fast.length) : model;
+  const match = withoutFast.match(/^(.*)-(none|low|medium|high|xhigh|max|extra-high)$/u);
+  const base = match?.[1] ?? withoutFast;
+  return `${base}-${effort}${fast}`;
+}
+
+class CursorAdapter {
+  provider = "cursor";
+  async capabilities(executable = envExecutable(this.provider)) {
+    const probe = await probeExecutable(this.provider, executable, process.cwd());
+    const features = probe.availability === "available" ? await executableFeatures(this.provider, executable) : [];
+    return {
+      provider: this.provider,
+      executable: probe.executable,
+      availability: probe.availability,
+      ...probe.version ? { version: probe.version } : {},
+      ...probe.reason ? { availabilityReason: probe.reason } : {},
+      access: ["answer-only", "inspect", "edit-isolated"],
+      sessions: ["persistent", "resume"],
+      supportsFork: false,
+      detectedFeatures: features,
+      supportsModel: features.includes("--model"),
+      supportsEffort: features.includes("--model"),
+      supportsSchema: false,
+      supportsModelListing: true
+    };
+  }
+  async listModels() {
+    return supportedModels("cursor");
+  }
+  async prepare(request, options = {}) {
+    const model = request.model ?? CURSOR_DEFAULT_MODEL;
+    if (model.toLowerCase() === "auto")
+      unsupported("Cursor model=auto is not allowed; name an exact model");
+    let next = request.model === undefined ? { ...request, model } : { ...request };
+    const models = supportedModels("cursor");
+    if (request.effort && !model.includes("[")) {
+      const candidate = modelWithEffort(model, request.effort);
+      if (models.includes(candidate))
+        next = { ...next, model: candidate };
+      else if (models.includes(model)) {
+        unsupported(`Cursor model ${model} has no supported ${request.effort} effort variant; choose an exact model ID`);
+      }
+    }
+    checkModel("cursor", next.model);
+    return withDefaultWorktreeName(next, options.generateWorktreeName ?? generateWorktreeName);
+  }
+  build(request) {
+    assertAccess(request, ["answer-only", "inspect", "edit-isolated"]);
+    assertSession(request, ["persistent", "resume"]);
+    rejectUnsupportedFork(request);
+    const model = request.model ?? CURSOR_DEFAULT_MODEL;
+    if (model.toLowerCase() === "auto")
+      unsupported("Cursor model=auto is not allowed; name an exact model");
+    if (request.schema)
+      unsupported("Cursor does not support JSON Schema-constrained output");
+    if (request.maxBudgetUsd !== undefined)
+      unsupported("Cursor does not expose a per-run budget flag");
+    const args = ["--print", "--workspace", request.cwd, "--model", cursorModel(model, request.effort)];
+    const options = withDefaultWorktreeName(request, generateWorktreeName).providerOptions?.cursor;
+    if (options?.trustWorkspace)
+      args.push("--trust");
+    if (request.output === "events") {
+      args.push("--output-format", "stream-json");
+      if (options?.streamPartialOutput)
+        args.push("--stream-partial-output");
+    }
+    if (request.access === "answer-only")
+      args.push("--mode", "ask");
+    if (request.access === "inspect")
+      args.push("--mode", "plan");
+    if (request.access === "edit-isolated") {
+      args.push("--worktree", options.worktreeName);
+      if (options?.worktreeBase)
+        args.push("--worktree-base", options.worktreeBase);
+      if (process.platform !== "win32")
+        args.push("--sandbox", "enabled");
+    }
+    if (request.session.mode === "persistent" && request.session.id) {
+      unsupported("Cursor cannot select a session ID when starting a persistent session");
+    }
+    if (request.session.mode === "resume")
+      args.push("--resume", request.session.id);
+    for (const directory of request.additionalDirs ?? [])
+      args.push("--add-dir", directory);
+    return {
+      provider: this.provider,
+      command: envExecutable(this.provider, request.env),
+      args,
+      cwd: request.cwd,
+      stdin: request.prompt,
+      structured: request.output === "events"
+    };
+  }
+  parse(stdout, structured, request) {
+    if (!structured)
+      return textOutput(this.provider, stdout);
+    const parsed = parseJsonLines(this.provider, stdout);
+    const warnings = parsed.warnings.length ? { warnings: parsed.warnings } : {};
+    if (parsed.error)
+      return { events: parsed.events, protocolError: parsed.error, unreadable: true, ...warnings };
+    return { ...this.parseEvents(parsed.events, request), ...warnings };
+  }
+  parseEvents(events, request) {
+    const terminal = findTerminalMarker(events, (event) => event.type.startsWith("result"));
+    if (terminal?.outcome === "failure") {
+      return { events, protocolError: providerFailureMessage("Cursor", terminal.event) };
+    }
+    const result = asRecord(terminal?.event.raw);
+    if (!result) {
+      return { events, protocolError: "Cursor stream did not contain a terminal result", unreadable: true };
+    }
+    if (result.is_error === true || result.subtype !== "success") {
+      return { events, protocolError: String(result.result ?? "Cursor reported an error") };
+    }
+    const init = asRecord(events.find((event) => event.type.startsWith("system"))?.raw);
+    const rawUsage = asRecord(result.usage);
+    const usage = {};
+    const inputTokens = numberValue(rawUsage?.inputTokens);
+    const cachedInputTokens = numberValue(rawUsage?.cacheReadTokens);
+    const outputTokens = numberValue(rawUsage?.outputTokens);
+    if (inputTokens !== undefined)
+      usage.inputTokens = inputTokens;
+    if (cachedInputTokens !== undefined)
+      usage.cachedInputTokens = cachedInputTokens;
+    if (outputTokens !== undefined)
+      usage.outputTokens = outputTokens;
+    return {
+      events,
+      ...typeof result.result === "string" ? { finalText: result.result } : {},
+      ...typeof result.session_id === "string" ? { sessionId: result.session_id } : typeof init?.session_id === "string" ? { sessionId: init.session_id } : {},
+      ...typeof init?.model === "string" ? { modelObserved: init.model } : {},
+      ...Object.keys(usage).length ? { usage } : {}
+    };
+  }
 }
 
 // src/adapters/claude.ts
@@ -466,6 +899,7 @@ class ClaudeAdapter {
   async capabilities(executable = envExecutable(this.provider)) {
     const cwd = process.cwd();
     const probe = await probeExecutable(this.provider, executable, cwd);
+    const features = probe.availability === "available" ? await executableFeatures(this.provider, executable) : [];
     return {
       provider: this.provider,
       executable: probe.executable,
@@ -474,16 +908,24 @@ class ClaudeAdapter {
       ...probe.reason ? { availabilityReason: probe.reason } : {},
       access: ["answer-only", "inspect", "edit-workspace", "edit-isolated"],
       sessions: ["ephemeral", "persistent", "resume"],
-      supportsModel: true,
-      supportsEffort: true,
-      supportsSchema: true,
+      supportsFork: features.includes("--fork-session"),
+      detectedFeatures: features,
+      supportsModel: features.includes("--model"),
+      supportsEffort: features.includes("--effort"),
+      supportsSchema: features.includes("--json-schema"),
       supportsModelListing: true
     };
   }
   async listModels() {
     return supportedModels("claude");
   }
-  async prepare(request, _options = {}) {
+  async prepare(request, options = {}) {
+    if (request.access === "edit-isolated" && !request.providerOptions?.claude?.worktreeName) {
+      request = { ...request, providerOptions: {
+        ...request.providerOptions,
+        claude: { ...request.providerOptions?.claude, worktreeName: (options.generateWorktreeName ?? generateWorktreeName)() }
+      } };
+    }
     if (request.model && isClaudeFable(request.model) && !request.effort) {
       return { ...request, effort: "low" };
     }
@@ -521,7 +963,7 @@ class ClaudeAdapter {
       if (options?.allowedTools?.length)
         args.push("--allowedTools", ...options.allowedTools);
       if (request.access === "edit-isolated") {
-        args.push("--worktree", options?.worktreeName ?? "agent-headless");
+        args.push("--worktree", options?.worktreeName ?? generateWorktreeName());
       }
     }
     const session = request.session;
@@ -546,25 +988,13 @@ class ClaudeAdapter {
   parse(stdout, structured) {
     if (!structured)
       return textOutput(this.provider, stdout);
-    const trimmed = stdout.trim();
-    if (!trimmed)
-      return { events: [], protocolError: "Claude returned no structured output", unreadable: true };
-    if (!trimmed.includes(`
-`)) {
-      try {
-        const raw = JSON.parse(trimmed);
-        return this.parseRecords([{ provider: this.provider, type: String(raw.type ?? "result"), kind: raw.is_error === true ? "error" : "result", raw }]);
-      } catch {
-        return { events: [], protocolError: "Claude returned invalid JSON", unreadable: true };
-      }
-    }
     const parsed = parseJsonLines(this.provider, stdout);
     const warnings = parsed.warnings.length ? { warnings: parsed.warnings } : {};
     if (parsed.error)
       return { events: parsed.events, protocolError: parsed.error, unreadable: true, ...warnings };
-    return { ...this.parseRecords(parsed.events), ...warnings };
+    return { ...this.parseEvents(parsed.events), ...warnings };
   }
-  parseRecords(events) {
+  parseEvents(events) {
     const terminal = findTerminalMarker(events, (event) => asRecord(event.raw)?.type === "result");
     if (terminal?.outcome === "failure") {
       return { events, protocolError: providerFailureMessage("Claude", terminal.event) };
@@ -574,7 +1004,7 @@ class ClaudeAdapter {
       return { events, protocolError: "Claude stream did not contain a terminal result", unreadable: true };
     }
     if (result.is_error === true)
-      return { events, protocolError: String(result.result ?? "Claude reported an error") };
+      return { events, protocolError: providerFailureMessage("Claude", terminal.event) };
     const usageRaw = asRecord(result.usage);
     const usage = {};
     const inputTokens = numberValue(usageRaw?.input_tokens);
@@ -599,6 +1029,7 @@ class ClaudeAdapter {
     const helperModels = principalUsage ? usageEntries.filter((entry) => entry !== principalUsage).map((entry) => entry.model) : principalModel ? usageEntries.filter((entry) => !compatibleModelIdentity(entry.model, principalModel)).map((entry) => entry.model) : [];
     return {
       events,
+      ...result.structured_output !== undefined ? { structuredOutput: result.structured_output } : {},
       ...typeof result.result === "string" ? { finalText: result.result } : {},
       ...typeof result.session_id === "string" ? { sessionId: result.session_id } : {},
       ...principalModel ? { modelObserved: principalModel } : {},
@@ -609,45 +1040,67 @@ class ClaudeAdapter {
 }
 
 // src/adapters/codex.ts
-import { existsSync as existsSync3, readFileSync as readFileSync2, readdirSync } from "node:fs";
+import { existsSync as existsSync4, openSync, closeSync, fstatSync, readSync, readdirSync } from "node:fs";
 import os from "node:os";
-import path3 from "node:path";
+import path4 from "node:path";
 var CODEX_FAILURE_TYPES = ["turn.failed"];
-function observedModelFromRollout(threadId, codexHome) {
+function observedRollout(threadId, request) {
+  if (request?.session?.mode === "ephemeral")
+    return {};
   try {
-    const root = path3.join(codexHome ?? process.env.CODEX_HOME ?? path3.join(os.homedir(), ".codex"), "sessions");
-    if (!existsSync3(root))
-      return;
+    const env = effectiveEnv(request?.env);
+    const root = path4.join(envValue(env, "CODEX_HOME") ?? path4.join(envValue(env, process.platform === "win32" ? "USERPROFILE" : "HOME") || os.homedir(), ".codex"), "sessions");
+    if (!existsSync4(root))
+      return {};
     const rollout = findRolloutFile(root, threadId);
     if (!rollout)
-      return;
+      return {};
     let model;
-    for (const line of readFileSync2(rollout, "utf8").split(`
+    let cwd;
+    const fd = openSync(rollout, "r");
+    let tail;
+    try {
+      const size = fstatSync(fd).size;
+      const length = Math.min(size, 2 * 1024 * 1024);
+      const buffer = Buffer.alloc(length);
+      const count = readSync(fd, buffer, 0, length, size - length);
+      tail = buffer.subarray(0, count).toString("utf8");
+    } finally {
+      closeSync(fd);
+    }
+    for (const line of tail.split(`
 `)) {
-      if (!line.includes('"turn_context"'))
+      if (!line.includes('"turn_context"') && !line.includes('"session_meta"'))
         continue;
       try {
         const record = asRecord(JSON.parse(line));
-        if (record?.type !== "turn_context")
+        if (record?.type !== "turn_context" && record?.type !== "session_meta")
           continue;
         const payload = asRecord(record.payload);
         if (typeof payload?.model === "string")
           model = payload.model;
+        if (typeof payload?.cwd === "string")
+          cwd = payload.cwd;
       } catch {}
     }
-    return model;
+    return {
+      ...model ? { modelObserved: model } : {},
+      ...request?.access === "edit-isolated" && cwd && path4.isAbsolute(cwd) && path4.resolve(cwd) !== path4.resolve(request.cwd) ? { worktree: cwd } : {}
+    };
   } catch {
-    return;
+    return {};
   }
 }
-function findRolloutFile(root, threadId, depth = 0) {
+function findRolloutFile(root, threadId, depth = 0, budget = { remaining: 1e4 }) {
   const entries = readdirSync(root, { withFileTypes: true }).sort((a, b) => b.name.localeCompare(a.name));
   for (const entry of entries) {
-    const full = path3.join(root, entry.name);
-    if (entry.isFile() && entry.name.startsWith("rollout-") && entry.name.includes(threadId))
+    if (--budget.remaining < 0)
+      return;
+    const full = path4.join(root, entry.name);
+    if (entry.isFile() && entry.name.startsWith("rollout-") && entry.name.endsWith(`-${threadId}.jsonl`))
       return full;
     if (entry.isDirectory() && depth < 3) {
-      const found = findRolloutFile(full, threadId, depth + 1);
+      const found = findRolloutFile(full, threadId, depth + 1, budget);
       if (found)
         return found;
     }
@@ -659,17 +1112,20 @@ class CodexAdapter {
   provider = "codex";
   async capabilities(executable = envExecutable(this.provider)) {
     const probe = await probeExecutable(this.provider, executable, process.cwd());
+    const features = probe.availability === "available" ? await executableFeatures(this.provider, executable, ["exec", "--help"]) : [];
     return {
       provider: this.provider,
       executable: probe.executable,
       availability: probe.availability,
       ...probe.version ? { version: probe.version } : {},
       ...probe.reason ? { availabilityReason: probe.reason } : {},
-      access: ["answer-only", "inspect", "edit-workspace", "inherit-session"],
+      access: ["answer-only", "inspect", "edit-workspace", "inherit-session", ...features.includes("--worktree") ? ["edit-isolated"] : []],
       sessions: ["ephemeral", "persistent", "resume"],
-      supportsModel: true,
+      supportsFork: features.includes("fork"),
+      detectedFeatures: features,
+      supportsModel: features.includes("--model"),
       supportsEffort: true,
-      supportsSchema: true,
+      supportsSchema: features.includes("--output-schema"),
       supportsModelListing: true
     };
   }
@@ -677,7 +1133,10 @@ class CodexAdapter {
     return supportedModels("codex");
   }
   build(request) {
-    assertAccess(request, ["answer-only", "inspect", "edit-workspace", "inherit-session"]);
+    assertAccess(request, ["answer-only", "inspect", "edit-workspace", "edit-isolated", "inherit-session"]);
+    if (request.access === "edit-isolated" && request.session?.mode === "ephemeral") {
+      unsupported("Codex isolated work requires a persistent session so its worktree can be recovered");
+    }
     assertSession(request, ["ephemeral", "persistent", "resume"]);
     if (request.maxBudgetUsd !== undefined)
       unsupported("Codex does not expose a per-run budget flag");
@@ -696,11 +1155,13 @@ class CodexAdapter {
     if (session.mode === "persistent" && session.id) {
       unsupported("Codex cannot select a session ID when starting a persistent session");
     }
-    if (request.additionalDirs?.length && request.access !== "edit-workspace") {
+    if (request.additionalDirs?.length && request.access !== "edit-workspace" && request.access !== "edit-isolated") {
       unsupported("Codex additionalDirs are writable and require access=edit-workspace");
     }
-    const args = session.mode === "resume" ? ["exec", "resume", session.id] : ["exec", "-C", request.cwd, "-s", request.access === "edit-workspace" ? "workspace-write" : "read-only"];
+    const args = session.mode === "resume" ? ["exec", session.fork ? "fork" : "resume", session.id] : ["exec", "-C", request.cwd, "-s", request.access === "edit-workspace" || request.access === "edit-isolated" ? "workspace-write" : "read-only"];
     if (session.mode !== "resume") {
+      if (request.access === "edit-isolated")
+        args.push("--worktree");
       if (session.mode === "ephemeral")
         args.push("--ephemeral");
       for (const directory of request.additionalDirs ?? [])
@@ -717,7 +1178,7 @@ class CodexAdapter {
     if (request.effort)
       args.push("-c", `model_reasoning_effort=${JSON.stringify(request.effort)}`);
     if (request.schema)
-      args.push("--output-schema", path3.resolve(request.schema));
+      args.push("--output-schema", path4.resolve(request.schema));
     if (request.output === "events")
       args.push("--json");
     args.push("-");
@@ -730,22 +1191,27 @@ class CodexAdapter {
       structured: request.output === "events"
     };
   }
-  parse(stdout, structured) {
+  parse(stdout, structured, request) {
     if (!structured)
       return textOutput(this.provider, stdout);
     const parsed = parseJsonLines(this.provider, stdout);
     const warnings = parsed.warnings.length ? { warnings: parsed.warnings } : {};
     if (parsed.error)
       return { events: parsed.events, protocolError: parsed.error, unreadable: true, ...warnings };
-    const started = parsed.events.find((event) => event.type === "thread.started");
-    const messages = parsed.events.map((event) => asRecord(event.raw)).map((raw) => asRecord(raw?.item)).filter((item) => item?.type === "agent_message" && typeof item.text === "string");
-    const terminal = findTerminalMarker(parsed.events, (event) => event.type === "turn.completed", CODEX_FAILURE_TYPES);
+    return { ...this.parseEvents(parsed.events, request), ...warnings };
+  }
+  parseEvents(events, request) {
+    const recovered = recoveryMetadata(events);
+    const metadata = { ...recovered, ...recovered.sessionId ? observedRollout(recovered.sessionId, request) : {} };
+    const started = events.find((event) => event.type === "thread.started");
+    const messages = events.map((event) => asRecord(event.raw)).map((raw) => asRecord(raw?.item)).filter((item) => item?.type === "agent_message" && typeof item.text === "string");
+    const terminal = findTerminalMarker(events, (event) => event.type === "turn.completed", CODEX_FAILURE_TYPES);
     if (terminal?.outcome === "failure") {
-      return { events: parsed.events, protocolError: providerFailureMessage("Codex", terminal.event), ...warnings };
+      return { ...metadata, events, protocolError: providerFailureMessage("Codex", terminal.event) };
     }
     const completed = terminal?.event;
     if (!completed) {
-      return { events: parsed.events, protocolError: "Codex stream did not contain turn.completed", unreadable: true, ...warnings };
+      return { ...metadata, events, protocolError: "Codex stream did not contain turn.completed", unreadable: true };
     }
     const startRaw = asRecord(started?.raw);
     const completeRaw = asRecord(completed.raw);
@@ -765,277 +1231,12 @@ class CodexAdapter {
       usage.reasoningOutputTokens = reasoningOutputTokens;
     const lastMessage = messages.at(-1);
     const threadId = typeof startRaw?.thread_id === "string" ? startRaw.thread_id : undefined;
-    const modelObserved = threadId ? observedModelFromRollout(threadId) : undefined;
     return {
-      events: parsed.events,
+      events,
       ...typeof lastMessage?.text === "string" ? { finalText: lastMessage.text } : {},
       ...threadId ? { sessionId: threadId } : {},
-      ...modelObserved ? { modelObserved } : {},
-      ...Object.keys(usage).length ? { usage } : {},
-      ...warnings
-    };
-  }
-}
-
-// src/adapters/cursor.ts
-import { spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { existsSync as existsSync4 } from "node:fs";
-import { homedir } from "node:os";
-import path4 from "node:path";
-function cursorModel(model, effort) {
-  if (!effort)
-    return model;
-  const suffix = model.match(/-(none|low|medium|high|xhigh|max|extra-high)(?:-fast)?$/u)?.[1];
-  if (suffix === effort || effort === "xhigh" && suffix === "extra-high")
-    return model;
-  const match = model.match(/^(.*)\[([^\]]*)\]$/u);
-  if (!match)
-    return `${model}[effort=${effort}]`;
-  const parameters = match[2];
-  const existing = parameters.match(/(?:^|,)effort=([^,]+)/u)?.[1];
-  if (existing === effort)
-    return model;
-  if (existing)
-    return `${match[1]}[${parameters.replace(/(^|,)effort=[^,]+/u, `$1effort=${effort}`)}]`;
-  return `${match[1]}[${parameters}${parameters ? "," : ""}effort=${effort}]`;
-}
-var CURSOR_DEFAULT_MODEL = "cursor-grok-4.6-medium";
-var WORKTREE_NAME_PREFIX = "agent-headless";
-function generateWorktreeName() {
-  return `${WORKTREE_NAME_PREFIX}-${Date.now().toString(36)}-${randomUUID().replace(/-/gu, "").slice(0, 12)}`;
-}
-function withDefaultWorktreeName(request, generate) {
-  if (request.access !== "edit-isolated")
-    return request;
-  const cursor = request.providerOptions?.cursor;
-  if (cursor?.worktreeName)
-    return request;
-  return {
-    ...request,
-    providerOptions: {
-      ...request.providerOptions,
-      cursor: { ...cursor, worktreeName: generate() }
-    }
-  };
-}
-var CURSOR_WORKTREES_ROOT_ENV = "CURSOR_WORKTREES_ROOT";
-var CURSOR_WORKTREE_NAME_PATTERN = /^[A-Za-z0-9._-]+$/u;
-function childEnvValue(name, env) {
-  const { matched, value } = lastEnvMatch(env ?? {}, name);
-  return matched ? value : process.env[name];
-}
-function cursorWorktreesRoot(env) {
-  const configured = childEnvValue(CURSOR_WORKTREES_ROOT_ENV, env);
-  if (configured !== undefined)
-    return configured;
-  try {
-    const home = homedir();
-    return home ? path4.join(home, ".cursor", "worktrees") : undefined;
-  } catch {
-    return;
-  }
-}
-function slugifyRepoName(name) {
-  const slug = name.toLowerCase().replace(/[^a-z0-9._-]+/gu, "-").replace(/-+/gu, "-").replace(/^-+|-+$/gu, "");
-  return slug || "worktree";
-}
-function hasGitAncestor(start) {
-  let current = start;
-  for (;; ) {
-    if (existsSync4(path4.join(current, ".git")))
-      return true;
-    const parent = path4.dirname(current);
-    if (parent === current)
-      return false;
-    current = parent;
-  }
-}
-function gitToplevel(cwd, env) {
-  try {
-    const childEnv = effectiveEnv(env);
-    const resolved = resolveCommand("git", ["rev-parse", "--show-toplevel"], childEnv);
-    const result = spawnSync(resolved.command, resolved.args, {
-      cwd,
-      env: childEnv,
-      encoding: "utf8",
-      windowsHide: true,
-      windowsVerbatimArguments: resolved.windowsVerbatimArguments,
-      timeout: 1e4
-    });
-    if (result.error || result.status !== 0)
-      return;
-    const toplevel = result.stdout.trim();
-    return toplevel ? path4.resolve(toplevel) : undefined;
-  } catch {
-    return;
-  }
-}
-function envKeyPart(env) {
-  if (!env)
-    return null;
-  const names = [...new Set(Object.keys(env).map(foldEnvName))].sort();
-  return names.map((name) => {
-    const { value } = lastEnvMatch(env, name);
-    return value === undefined ? [name] : [name, value];
-  });
-}
-var repoSlugCache = new Map;
-function repoSlugKey(cwd, env) {
-  return JSON.stringify([cwd, envKeyPart(env)]);
-}
-function cursorRepoSlug(cwd, env) {
-  const start = path4.resolve(cwd);
-  const key = repoSlugKey(start, env);
-  const cached = repoSlugCache.get(key);
-  if (cached !== undefined || repoSlugCache.has(key))
-    return cached;
-  const toplevel = hasGitAncestor(start) ? gitToplevel(start, env) : undefined;
-  const slug = toplevel === undefined ? undefined : slugifyRepoName(path4.basename(toplevel));
-  repoSlugCache.set(key, slug);
-  return slug;
-}
-function cursorWorktreePath(request, cwd = request.cwd, env = request.env) {
-  if (request.provider !== "cursor" || request.access !== "edit-isolated")
-    return;
-  const name = request.providerOptions?.cursor?.worktreeName;
-  if (!name || !CURSOR_WORKTREE_NAME_PATTERN.test(name))
-    return;
-  const root = cursorWorktreesRoot(env);
-  const slug = cursorRepoSlug(cwd, env);
-  if (root === undefined || slug === undefined)
-    return;
-  return path4.resolve(cwd, root, slug, name);
-}
-function modelWithEffort(model, effort) {
-  const fast = model.endsWith("-fast") ? "-fast" : "";
-  const withoutFast = fast ? model.slice(0, -fast.length) : model;
-  const match = withoutFast.match(/^(.*)-(none|low|medium|high|xhigh|max|extra-high)$/u);
-  const base = match?.[1] ?? withoutFast;
-  return `${base}-${effort}${fast}`;
-}
-
-class CursorAdapter {
-  provider = "cursor";
-  async capabilities(executable = envExecutable(this.provider)) {
-    const probe = await probeExecutable(this.provider, executable, process.cwd());
-    return {
-      provider: this.provider,
-      executable: probe.executable,
-      availability: probe.availability,
-      ...probe.version ? { version: probe.version } : {},
-      ...probe.reason ? { availabilityReason: probe.reason } : {},
-      access: ["answer-only", "inspect", "edit-isolated"],
-      sessions: ["persistent", "resume"],
-      supportsModel: true,
-      supportsEffort: true,
-      supportsSchema: false,
-      supportsModelListing: true
-    };
-  }
-  async listModels() {
-    return supportedModels("cursor");
-  }
-  async prepare(request, options = {}) {
-    const model = request.model ?? CURSOR_DEFAULT_MODEL;
-    if (model.toLowerCase() === "auto")
-      unsupported("Cursor model=auto is not allowed; name an exact model");
-    let next = request.model === undefined ? { ...request, model } : { ...request };
-    const models = supportedModels("cursor");
-    if (request.effort && !model.includes("[")) {
-      const candidate = modelWithEffort(model, request.effort);
-      if (models.includes(candidate))
-        next = { ...next, model: candidate };
-      else if (models.includes(model)) {
-        unsupported(`Cursor model ${model} has no supported ${request.effort} effort variant; choose an exact model ID`);
-      }
-    }
-    checkModel("cursor", next.model);
-    return withDefaultWorktreeName(next, options.generateWorktreeName ?? generateWorktreeName);
-  }
-  build(request) {
-    assertAccess(request, ["answer-only", "inspect", "edit-isolated"]);
-    assertSession(request, ["persistent", "resume"]);
-    const model = request.model ?? CURSOR_DEFAULT_MODEL;
-    if (model.toLowerCase() === "auto")
-      unsupported("Cursor model=auto is not allowed; name an exact model");
-    if (request.schema)
-      unsupported("Cursor does not support JSON Schema-constrained output");
-    if (request.maxBudgetUsd !== undefined)
-      unsupported("Cursor does not expose a per-run budget flag");
-    const args = ["--print", "--workspace", request.cwd, "--model", cursorModel(model, request.effort)];
-    const options = withDefaultWorktreeName(request, generateWorktreeName).providerOptions?.cursor;
-    if (options?.trustWorkspace)
-      args.push("--trust");
-    if (request.output === "events") {
-      args.push("--output-format", "stream-json");
-      if (options?.streamPartialOutput)
-        args.push("--stream-partial-output");
-    }
-    if (request.access === "answer-only")
-      args.push("--mode", "ask");
-    if (request.access === "inspect")
-      args.push("--mode", "plan");
-    if (request.access === "edit-isolated") {
-      args.push("--worktree", options.worktreeName);
-      if (options?.worktreeBase)
-        args.push("--worktree-base", options.worktreeBase);
-      if (process.platform !== "win32")
-        args.push("--sandbox", "enabled");
-    }
-    if (request.session.mode === "persistent" && request.session.id) {
-      unsupported("Cursor cannot select a session ID when starting a persistent session");
-    }
-    if (request.session.mode === "resume")
-      args.push("--resume", request.session.id);
-    for (const directory of request.additionalDirs ?? [])
-      args.push("--add-dir", directory);
-    return {
-      provider: this.provider,
-      command: envExecutable(this.provider, request.env),
-      args,
-      cwd: request.cwd,
-      stdin: request.prompt,
-      structured: request.output === "events"
-    };
-  }
-  parse(stdout, structured) {
-    if (!structured)
-      return textOutput(this.provider, stdout);
-    const parsed = parseJsonLines(this.provider, stdout);
-    const warnings = parsed.warnings.length ? { warnings: parsed.warnings } : {};
-    if (parsed.error)
-      return { events: parsed.events, protocolError: parsed.error, unreadable: true, ...warnings };
-    const terminal = findTerminalMarker(parsed.events, (event) => event.type.startsWith("result"));
-    if (terminal?.outcome === "failure") {
-      return { events: parsed.events, protocolError: providerFailureMessage("Cursor", terminal.event), ...warnings };
-    }
-    const result = asRecord(terminal?.event.raw);
-    if (!result) {
-      return { events: parsed.events, protocolError: "Cursor stream did not contain a terminal result", unreadable: true, ...warnings };
-    }
-    if (result.is_error === true || result.subtype !== "success") {
-      return { events: parsed.events, protocolError: String(result.result ?? "Cursor reported an error"), ...warnings };
-    }
-    const init = asRecord(parsed.events.find((event) => event.type.startsWith("system"))?.raw);
-    const rawUsage = asRecord(result.usage);
-    const usage = {};
-    const inputTokens = numberValue(rawUsage?.inputTokens);
-    const cachedInputTokens = numberValue(rawUsage?.cacheReadTokens);
-    const outputTokens = numberValue(rawUsage?.outputTokens);
-    if (inputTokens !== undefined)
-      usage.inputTokens = inputTokens;
-    if (cachedInputTokens !== undefined)
-      usage.cachedInputTokens = cachedInputTokens;
-    if (outputTokens !== undefined)
-      usage.outputTokens = outputTokens;
-    return {
-      events: parsed.events,
-      ...typeof result.result === "string" ? { finalText: result.result } : {},
-      ...typeof result.session_id === "string" ? { sessionId: result.session_id } : typeof init?.session_id === "string" ? { sessionId: init.session_id } : {},
-      ...typeof init?.model === "string" ? { modelObserved: init.model } : {},
-      ...Object.keys(usage).length ? { usage } : {},
-      ...warnings
+      ...metadata,
+      ...Object.keys(usage).length ? { usage } : {}
     };
   }
 }
@@ -1071,6 +1272,7 @@ class AntigravityAdapter {
   provider = "antigravity";
   async capabilities(executable = envExecutable(this.provider)) {
     const probe = await probeExecutable(this.provider, executable, process.cwd());
+    const features = probe.availability === "available" ? await executableFeatures(this.provider, executable) : [];
     return {
       provider: this.provider,
       executable: probe.executable,
@@ -1079,9 +1281,11 @@ class AntigravityAdapter {
       ...probe.reason ? { availabilityReason: probe.reason } : {},
       access: ["answer-only", "inspect", "edit-workspace"],
       sessions: ["persistent", "resume"],
-      supportsModel: true,
-      supportsEffort: true,
-      supportsSchema: true,
+      supportsFork: false,
+      detectedFeatures: features,
+      supportsModel: features.includes("--model"),
+      supportsEffort: features.includes("--effort"),
+      supportsSchema: features.includes("--json-schema"),
       supportsModelListing: true
     };
   }
@@ -1095,6 +1299,7 @@ class AntigravityAdapter {
   build(request) {
     assertAccess(request, ["answer-only", "inspect", "edit-workspace"]);
     assertSession(request, ["persistent", "resume"]);
+    rejectUnsupportedFork(request);
     if (request.maxBudgetUsd !== undefined)
       unsupported("Antigravity does not expose a per-run budget flag");
     if (request.effort === "xhigh" || request.effort === "max") {
@@ -1137,17 +1342,20 @@ class AntigravityAdapter {
       structured: request.output === "events"
     };
   }
-  parse(stdout, structured) {
+  parse(stdout, structured, request) {
     if (!structured)
       return textOutput(this.provider, stdout);
     const parsed = parseJsonLines(this.provider, stdout);
     const warnings = parsed.warnings.length ? { warnings: parsed.warnings } : {};
     if (parsed.error)
       return { events: parsed.events, protocolError: parsed.error, unreadable: true, ...warnings };
+    return { ...this.parseEvents(parsed.events, request), ...warnings };
+  }
+  parseEvents(events, request) {
     let terminal;
     let terminalFailure;
-    for (let index = parsed.events.length - 1;index >= 0; index -= 1) {
-      const event = parsed.events[index];
+    for (let index = events.length - 1;index >= 0; index -= 1) {
+      const event = events[index];
       if (event.kind === "error") {
         terminalFailure = event;
         break;
@@ -1160,31 +1368,29 @@ class AntigravityAdapter {
     if (terminalFailure) {
       const raw = asRecord(terminalFailure.raw);
       const message = typeof raw?.message === "string" ? `: ${raw.message}` : "";
-      return { events: parsed.events, protocolError: `Antigravity reported ${terminalFailure.type}${message}`, ...warnings };
+      return { events, protocolError: `Antigravity reported ${terminalFailure.type}${message}` };
     }
     const result = resultRecord(terminal);
     if (!result) {
       return {
-        events: parsed.events,
+        events,
         protocolError: "Antigravity stream did not contain a terminal result",
-        unreadable: true,
-        ...warnings
+        unreadable: true
       };
     }
     if (result.status !== "SUCCESS") {
-      return { events: parsed.events, protocolError: reportedFailure(result), ...warnings };
+      return { events, protocolError: reportedFailure(result) };
     }
-    const init = asRecord(parsed.events.find((event) => event.type === "init")?.raw);
+    const init = asRecord(events.find((event) => event.type === "init")?.raw);
     const initDetails = asRecord(init?.init);
     const conversationId = result.conversation_id ?? init?.conversation_id;
     const usage = usageFrom(asRecord(result.usage));
     return {
-      events: parsed.events,
+      events,
       ...typeof result.response === "string" ? { finalText: result.response } : {},
       ...typeof conversationId === "string" && conversationId ? { sessionId: conversationId } : {},
       ...typeof initDetails?.model === "string" ? { modelObserved: initDetails.model } : {},
-      ...usage ? { usage } : {},
-      ...warnings
+      ...usage ? { usage } : {}
     };
   }
 }
@@ -1221,6 +1427,12 @@ function normalizeRequest(request) {
   }
   if (request.model !== undefined && !request.model.trim())
     invalid("model must be non-empty");
+  for (const value of Object.values(request.outputLimits ?? {})) {
+    if (!Number.isSafeInteger(value) || value <= 0)
+      invalid("output limits must be positive safe integers");
+  }
+  if (request.session?.mode === "resume" && !request.session.id?.trim())
+    invalid("resume requires a session ID");
   const additionalDirs = request.additionalDirs?.map((directory) => {
     if (!existsSync5(directory) || !statSync(directory).isDirectory()) {
       invalid(`additional directory does not exist: ${directory}`);
@@ -1232,7 +1444,7 @@ function normalizeRequest(request) {
     cwd: realpathSync(request.cwd),
     access: request.access ?? (request.provider === "codex" && request.session?.mode === "resume" ? "inherit-session" : "answer-only"),
     output: request.output ?? "events",
-    session: request.session ?? (request.provider === "cursor" || request.provider === "antigravity" ? { mode: "persistent" } : { mode: "ephemeral" }),
+    session: request.session ?? (request.provider === "cursor" || request.provider === "antigravity" || request.provider === "codex" && request.access === "edit-isolated" ? { mode: "persistent" } : { mode: "ephemeral" }),
     timeoutMs: request.timeoutMs ?? 20 * 60000,
     ...additionalDirs ? { additionalDirs } : {}
   };
@@ -1296,12 +1508,12 @@ function absoluteReported(disclosed, cwd) {
   const resolved = path5.resolve(cwd, trimmed);
   return path5.isAbsolute(resolved) ? resolved : undefined;
 }
-function describeWorkspace(request, cwd, events, stdout) {
+function describeWorkspace(request, cwd, events, stdout, providerWorktree) {
   const isolated = request.access === "edit-isolated";
   const cursor = request.providerOptions?.cursor;
-  const worktreeName = !isolated ? undefined : request.provider === "cursor" ? cursor?.worktreeName : request.provider === "claude" ? request.providerOptions?.claude?.worktreeName ?? "agent-headless" : undefined;
+  const worktreeName = !isolated ? undefined : request.provider === "cursor" ? cursor?.worktreeName : request.provider === "claude" ? request.providerOptions?.claude?.worktreeName : undefined;
   const worktreeBase = isolated && request.provider === "cursor" ? cursor?.worktreeBase : undefined;
-  const disclosed = isolated ? worktreeFromEvents(events, cwd) ?? worktreeFromText(stdout, worktreeName) : undefined;
+  const disclosed = isolated ? providerWorktree ?? worktreeFromEvents(events, cwd) ?? worktreeFromText(stdout, worktreeName) : undefined;
   const reported = absoluteReported(disclosed, cwd);
   const derived = isolated && !reported ? cursorWorktreePath(request, cwd, request.env) : undefined;
   const worktree = reported ?? derived;
@@ -1314,8 +1526,106 @@ function describeWorkspace(request, cwd, events, stdout) {
     ...worktreeBase ? { worktreeBase } : {}
   };
 }
+
+// src/updates.ts
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { homedir as homedir2 } from "node:os";
+import path6 from "node:path";
+import { randomUUID as randomUUID2 } from "node:crypto";
+
 // src/version.ts
-var VERSION = "0.7.0";
+var VERSION = "0.8.0";
+
+// src/updates.ts
+var REGISTRY_URL = "https://registry.npmjs.org/agent-headless/latest";
+var DAY_MS = 24 * 60 * 60000;
+var TIMEOUT_MS = 1500;
+var STABLE_VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;
+function stableVersion(value) {
+  return typeof value === "string" && STABLE_VERSION.test(value) && value.split(".").every((part) => Number.isSafeInteger(Number(part)));
+}
+function newerStableVersion(latest, current) {
+  if (!stableVersion(latest))
+    return false;
+  const core = current.split(/[+-]/u)[0];
+  if (!stableVersion(core))
+    return false;
+  const next = latest.split(".").map(Number);
+  const installed = core.split(".").map(Number);
+  for (let index = 0;index < 3; index++) {
+    if (next[index] !== installed[index])
+      return next[index] > installed[index];
+  }
+  return current.split("+")[0].includes("-");
+}
+async function checkForUpdates(options = {}) {
+  const unavailable = { currentVersion: VERSION, status: "unavailable" };
+  const env = effectiveEnv(options.env);
+  if (envValue(env, "AGENT_HEADLESS_NO_UPDATE_CHECK") === "1") {
+    return { currentVersion: VERSION, status: "disabled" };
+  }
+  const checked = (latestVersion) => ({
+    currentVersion: VERSION,
+    status: "checked",
+    latestVersion,
+    updateAvailable: newerStableVersion(latestVersion, VERSION)
+  });
+  try {
+    const root = options.cacheDir ?? path6.join(envValue(env, "XDG_CACHE_HOME") || (process.platform === "win32" ? envValue(env, "LOCALAPPDATA") : undefined) || path6.join(homedir2(), ".cache"), "agent-headless");
+    const cachePath = path6.join(root, "update-check.json");
+    if (!options.force) {
+      try {
+        const cached = JSON.parse(await readFile(cachePath, "utf8"));
+        const age = Date.now() - cached.checkedAt;
+        const ttl = cached.latestVersion === null ? 60 * 60000 : DAY_MS;
+        if (typeof cached.checkedAt === "number" && age >= 0 && age < ttl) {
+          if (stableVersion(cached.latestVersion))
+            return checked(cached.latestVersion);
+          if (cached.latestVersion === null)
+            return unavailable;
+        }
+      } catch {}
+    }
+    let latestVersion = null;
+    const controller = new AbortController;
+    let timer;
+    try {
+      latestVersion = await Promise.race([
+        (async () => {
+          const response = await (options.fetch ?? globalThis.fetch)(REGISTRY_URL, { signal: controller.signal });
+          if (!response.ok)
+            return null;
+          const data = await response.json();
+          return stableVersion(data?.version) ? data.version : null;
+        })(),
+        new Promise((resolve) => {
+          timer = setTimeout(() => {
+            controller.abort();
+            resolve(null);
+          }, TIMEOUT_MS);
+        })
+      ]);
+    } catch {} finally {
+      clearTimeout(timer);
+    }
+    const temporary = `${cachePath}.${randomUUID2()}.tmp`;
+    try {
+      await mkdir(root, { recursive: true });
+      await writeFile(temporary, JSON.stringify({ checkedAt: Date.now(), latestVersion }), { mode: 384 });
+      await rename(temporary, cachePath);
+    } catch {} finally {
+      await rm(temporary, { force: true }).catch(() => {});
+    }
+    return latestVersion ? checked(latestVersion) : unavailable;
+  } catch {
+    return unavailable;
+  }
+}
+function updateNotice(info) {
+  if (!info.updateAvailable || !info.latestVersion)
+    return;
+  return `agent-headless ${info.latestVersion} is available (installed: ${info.currentVersion}). Update the consuming repo's dependency and lockfile, or use npx -y agent-headless@latest.`;
+}
 
 // src/index.ts
 var MODEL_REJECTION = /(?:unknown|unrecognized|unsupported|invalid|unavailable)\s+model|no\s+such\s+model|model\b[^\n]{0,80}?(?:not\s+(?:found|available|supported|recognized)|does\s+not\s+exist|is\s+invalid|is\s+no\s+longer)/iu;
@@ -1341,6 +1651,15 @@ async function modelRejectionWarnings(request, modelDefaulted, text, options) {
   return warnings;
 }
 async function runAgent(input, options = {}) {
+  if (!options.checkForUpdates)
+    return executeAgent(input, options);
+  const [result, update] = await Promise.all([
+    executeAgent(input, options),
+    checkForUpdates({ ...input.env ? { env: input.env } : {} })
+  ]);
+  return { ...result, update };
+}
+async function executeAgent(input, options) {
   let request = normalizeRequest(input);
   const adapter = getAdapter(request.provider);
   const modelChosenByCaller = request.model !== undefined;
@@ -1353,94 +1672,78 @@ async function runAgent(input, options = {}) {
   const modelUncatalogued = request.model !== undefined && !checkModel(request.provider, request.model).catalogued;
   const modelWarnings = modelUncatalogued ? [`model "${request.model}" is not in agent-headless's known ${request.provider} catalog; passed through unverified - check modelObserved`] : [];
   const invocation = adapter.build(request);
-  const streamWarnings = [];
+  const parser = new JsonLineParser(request.provider);
+  const streamWarnings = new Set;
+  const emit = (event) => {
+    try {
+      request.onEvent?.(event);
+    } catch {
+      streamWarnings.add("onEvent callback threw; provider execution continued");
+    }
+  };
   const processResult = await (options.execute ?? runInvocation)(invocation, {
     timeoutMs: request.timeoutMs,
+    ...request.outputLimits ? { outputLimits: request.outputLimits } : {},
     ...request.signal ? { signal: request.signal } : {},
     ...request.env ? { env: request.env } : {},
-    ...invocation.structured && request.onEvent ? {
+    ...invocation.structured ? {
       onStdoutLine: (line) => {
-        try {
-          request.onEvent?.(parseJsonEvent(request.provider, line));
-        } catch {
-          streamWarnings.push("invalid JSONL received during streaming");
-        }
+        const event = parser.push(line);
+        if (event)
+          emit(event);
       }
     } : {}
   });
-  const structuredPartial = invocation.structured ? parseJsonLines(request.provider, processResult.stdout) : undefined;
-  const textPartial = invocation.structured ? undefined : adapter.parse(processResult.stdout, false);
-  const partialEvents = structuredPartial?.events ?? textPartial?.events ?? [];
-  const partialFinalText = textPartial?.finalText;
-  const partialWarnings = [...new Set([
-    ...modelWarnings,
-    ...streamWarnings,
-    ...structuredPartial?.warnings ?? [],
-    ...structuredPartial?.error ? [structuredPartial.error] : []
-  ])];
-  const partialWorkspace = describeWorkspace(request, invocation.cwd, partialEvents, processResult.stdout);
-  if (processResult.timedOut || processResult.cancelled) {
-    return {
-      provider: request.provider,
-      status: processResult.timedOut ? "timed-out" : "cancelled",
-      ...partialFinalText !== undefined ? { finalText: partialFinalText } : {},
-      events: partialEvents,
-      exitCode: processResult.exitCode,
-      ...request.model ? { modelRequested: request.model } : {},
-      ...modelDefaulted ? { modelDefaulted: true } : {},
-      ...modelUncatalogued ? { modelUncatalogued: true } : {},
-      warnings: partialWarnings,
-      workspace: partialWorkspace,
-      stderr: processResult.stderr,
-      durationMs: processResult.durationMs
-    };
+  const limits = { ...DEFAULT_OUTPUT_LIMITS, ...request.outputLimits };
+  for (const stream of ["stdout", "stderr"]) {
+    const limit = limits[stream === "stdout" ? "stdoutBytes" : "stderrBytes"];
+    if (Buffer.byteLength(processResult[stream]) > limit) {
+      processResult[stream] = utf8Prefix(processResult[stream], limit);
+      processResult.outputLimitExceeded ??= stream;
+    }
   }
-  if (processResult.exitCode !== 0) {
-    const rejection = await modelRejectionWarnings(request, modelDefaulted, `${processResult.stderr}
-${processResult.stdout}`, options);
-    return {
-      provider: request.provider,
-      status: "failed",
-      ...partialFinalText !== undefined ? { finalText: partialFinalText } : {},
-      events: partialEvents,
-      exitCode: processResult.exitCode,
-      ...request.model ? { modelRequested: request.model } : {},
-      ...modelDefaulted ? { modelDefaulted: true } : {},
-      ...modelUncatalogued ? { modelUncatalogued: true } : {},
-      warnings: [...new Set([...partialWarnings, ...rejection])],
-      workspace: partialWorkspace,
-      stderr: processResult.stderr,
-      durationMs: processResult.durationMs
-    };
-  }
-  const parsed = adapter.parse(processResult.stdout, invocation.structured);
+  const decoded = invocation.structured ? options.execute ? parseJsonLines(request.provider, processResult.stdout) : parser.result() : undefined;
+  const parsed = decoded && adapter.parseEvents ? {
+    ...adapter.parseEvents(decoded.events, request),
+    warnings: decoded.warnings,
+    ...decoded.error ? { protocolError: decoded.error, unreadable: true } : {}
+  } : adapter.parse(processResult.stdout, invocation.structured, request);
   if (!invocation.structured)
     for (const event of parsed.events)
-      request.onEvent?.(event);
-  const rejection = parsed.protocolError ? await modelRejectionWarnings(request, modelDefaulted, `${parsed.protocolError}
-${processResult.stderr}`, options) : [];
+      emit(event);
+  const recovered = recoveryMetadata(parsed.events);
+  const sessionId = parsed.sessionId ?? recovered.sessionId ?? (request.session?.mode === "resume" && !request.session.fork ? request.session.id : request.session?.mode === "persistent" ? request.session.id : undefined);
+  const observed = parsed.modelObserved ?? recovered.modelObserved;
+  const status = processResult.timedOut ? "timed-out" : processResult.cancelled ? "cancelled" : processResult.outputLimitExceeded || processResult.inputError || processResult.exitCode !== 0 ? "failed" : parsed.protocolError ? parsed.unreadable ? "unparsed" : "failed" : "succeeded";
+  const rejection = status === "failed" ? await modelRejectionWarnings(request, modelDefaulted, `${parsed.protocolError ?? ""}
+${processResult.stderr}
+${processResult.stdout}`, options) : [];
   const warnings = [...new Set([
     ...modelWarnings,
     ...streamWarnings,
     ...parsed.warnings ?? [],
     ...parsed.protocolError ? [parsed.protocolError] : [],
+    ...processResult.outputLimitExceeded ? [`provider ${processResult.outputLimitExceeded} exceeded the configured output limit; run stopped and output is incomplete`] : [],
+    ...processResult.inputError ? [processResult.inputError] : [],
+    ...processResult.exitCode !== 0 && !processResult.timedOut && !processResult.cancelled && !parsed.protocolError ? [`${request.provider} exited with ${String(processResult.exitCode)}`] : [],
     ...rejection
   ])];
   return {
     provider: request.provider,
-    status: parsed.protocolError ? parsed.unreadable ? "unparsed" : "failed" : "succeeded",
+    status,
     ...parsed.finalText !== undefined ? { finalText: parsed.finalText } : {},
+    ...parsed.structuredOutput !== undefined ? { structuredOutput: parsed.structuredOutput } : {},
     events: parsed.events,
     exitCode: processResult.exitCode,
-    ...parsed.sessionId ? { sessionId: parsed.sessionId } : {},
+    ...sessionId ? { sessionId } : {},
     ...request.model ? { modelRequested: request.model } : {},
     ...modelDefaulted ? { modelDefaulted: true } : {},
     ...modelUncatalogued ? { modelUncatalogued: true } : {},
-    ...parsed.modelObserved ? { modelObserved: parsed.modelObserved } : {},
+    ...observed ? { modelObserved: observed } : {},
     ...parsed.helperModelsObserved?.length ? { helperModelsObserved: parsed.helperModelsObserved } : {},
     ...parsed.usage ? { usage: parsed.usage } : {},
     warnings,
-    workspace: describeWorkspace(request, invocation.cwd, parsed.events, processResult.stdout),
+    workspace: describeWorkspace(request, invocation.cwd, parsed.events, processResult.stdout, parsed.worktree),
     stderr: processResult.stderr,
     durationMs: processResult.durationMs
   };
@@ -1460,39 +1763,41 @@ async function listModels(provider, options = {}) {
 }
 function assertSucceeded(result) {
   if (result.status !== "succeeded") {
-    throw new AgentHeadlessError(result.status === "unparsed" ? "invalid_provider_output" : "provider_failed", `${result.provider} ${result.status}${result.stderr ? `: ${result.stderr.trim()}` : ""}`);
+    throw new AgentHeadlessError(result.status === "unparsed" ? "invalid_provider_output" : "provider_failed", `${result.provider} ${result.status}: ${result.stderr.trim() || result.warnings.join("; ") || "no provider diagnostic"}`);
   }
 }
 export {
-  AgentHeadlessError,
-  AntigravityAdapter,
-  CURSOR_DEFAULT_MODEL,
-  CURSOR_WORKTREES_ROOT_ENV,
-  CURSOR_WORKTREE_NAME_PATTERN,
-  ClaudeAdapter,
-  CodexAdapter,
-  CursorAdapter,
-  MAX_JSONL_WARNINGS,
-  SUPPORTED_MODELS,
-  VERSION,
-  WORKTREE_NAME_PREFIX,
-  assertSucceeded,
-  cursorRepoSlug,
-  cursorWorktreePath,
-  cursorWorktreesRoot,
-  describeWorkspace,
-  generateWorktreeName,
-  getAdapter,
-  getAllCapabilities,
-  getCapabilities,
-  invalid,
-  listModels,
-  parseJsonEvent,
-  parseJsonLines,
-  probeExecutable,
-  resolveOnWindows,
-  runAgent,
-  runInvocation,
+  unsupported,
   supportedModels,
-  unsupported
+  runInvocation,
+  runAgent,
+  resolveOnWindows,
+  probeExecutable,
+  parseJsonLines,
+  parseJsonEvent,
+  listModels,
+  invalid,
+  getCapabilities,
+  getAllCapabilities,
+  getAdapter,
+  generateWorktreeName,
+  describeWorkspace,
+  cursorWorktreesRoot,
+  cursorWorktreePath,
+  cursorRepoSlug,
+  checkForUpdates,
+  assertSucceeded,
+  WORKTREE_NAME_PREFIX,
+  VERSION,
+  SUPPORTED_MODELS,
+  MAX_JSONL_WARNINGS,
+  DEFAULT_OUTPUT_LIMITS,
+  CursorAdapter,
+  CodexAdapter,
+  ClaudeAdapter,
+  CURSOR_WORKTREE_NAME_PATTERN,
+  CURSOR_WORKTREES_ROOT_ENV,
+  CURSOR_DEFAULT_MODEL,
+  AntigravityAdapter,
+  AgentHeadlessError
 };

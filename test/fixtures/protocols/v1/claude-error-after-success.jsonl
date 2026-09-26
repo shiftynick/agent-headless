@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","session_id":"fixture-session","model":"fixture-model"}
+{"type":"result","subtype":"success","is_error":false,"result":"OK","session_id":"fixture-session","usage":{"input_tokens":3,"output_tokens":1}}
+{"type":"error","message":"fixture provider failure"}

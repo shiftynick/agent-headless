@@ -5,5 +5,6 @@ export declare class AntigravityAdapter implements ProviderAdapter {
     capabilities(executable?: string): Promise<ProviderCapabilities>;
     listModels(options?: ListModelsOptions): Promise<string[]>;
     build(request: RunRequest): Invocation;
-    parse(stdout: string, structured: boolean): ParsedOutput;
+    parse(stdout: string, structured: boolean, request?: RunRequest): ParsedOutput;
+    parseEvents(events: ParsedOutput["events"], request?: RunRequest): ParsedOutput;
 }

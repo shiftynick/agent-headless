@@ -91,5 +91,6 @@ export declare class CursorAdapter implements ProviderAdapter {
     listModels(): Promise<string[]>;
     prepare(request: RunRequest, options?: PrepareOptions): Promise<RunRequest>;
     build(request: RunRequest): Invocation;
-    parse(stdout: string, structured: boolean): ParsedOutput;
+    parse(stdout: string, structured: boolean, request?: RunRequest): ParsedOutput;
+    parseEvents(events: ParsedOutput["events"], request?: RunRequest): ParsedOutput;
 }

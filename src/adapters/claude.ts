@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { unsupported } from "../errors";
 import { asRecord, numberValue, parseJsonLines } from "../jsonl";
 import { isClaudeFable, supportedModels } from "../models";
+import { generateWorktreeName } from "./cursor";
 import { probeExecutable } from "../process";
 import type {
   AgentUsage,
@@ -16,6 +17,7 @@ import {
   assertAccess,
   assertSession,
   envExecutable,
+  executableFeatures,
   findTerminalMarker,
   providerFailureMessage,
   textOutput,
@@ -89,6 +91,7 @@ export class ClaudeAdapter implements ProviderAdapter {
   async capabilities(executable = envExecutable(this.provider)): Promise<ProviderCapabilities> {
     const cwd = process.cwd();
     const probe = await probeExecutable(this.provider, executable, cwd);
+    const features = probe.availability === "available" ? await executableFeatures(this.provider, executable) : [];
     return {
       provider: this.provider,
       executable: probe.executable,
@@ -97,9 +100,11 @@ export class ClaudeAdapter implements ProviderAdapter {
       ...(probe.reason ? { availabilityReason: probe.reason } : {}),
       access: ["answer-only", "inspect", "edit-workspace", "edit-isolated"],
       sessions: ["ephemeral", "persistent", "resume"],
-      supportsModel: true,
-      supportsEffort: true,
-      supportsSchema: true,
+      supportsFork: features.includes("--fork-session"),
+      detectedFeatures: features,
+      supportsModel: features.includes("--model"),
+      supportsEffort: features.includes("--effort"),
+      supportsSchema: features.includes("--json-schema"),
       supportsModelListing: true,
     };
   }
@@ -108,7 +113,12 @@ export class ClaudeAdapter implements ProviderAdapter {
     return supportedModels("claude");
   }
 
-  async prepare(request: RunRequest, _options: PrepareOptions = {}): Promise<RunRequest> {
+  async prepare(request: RunRequest, options: PrepareOptions = {}): Promise<RunRequest> {
+    if (request.access === "edit-isolated" && !request.providerOptions?.claude?.worktreeName) {
+      request = { ...request, providerOptions: { ...request.providerOptions,
+        claude: { ...request.providerOptions?.claude, worktreeName: (options.generateWorktreeName ?? generateWorktreeName)() },
+      } };
+    }
     if (request.model && isClaudeFable(request.model) && !request.effort) {
       return { ...request, effort: "low" };
     }
@@ -143,7 +153,7 @@ export class ClaudeAdapter implements ProviderAdapter {
       args.push("--permission-mode", "acceptEdits");
       if (options?.allowedTools?.length) args.push("--allowedTools", ...options.allowedTools);
       if (request.access === "edit-isolated") {
-        args.push("--worktree", options?.worktreeName ?? "agent-headless");
+        args.push("--worktree", options?.worktreeName ?? generateWorktreeName());
       }
     }
 
@@ -167,24 +177,13 @@ export class ClaudeAdapter implements ProviderAdapter {
 
   parse(stdout: string, structured: boolean): ParsedOutput {
     if (!structured) return textOutput(this.provider, stdout);
-    const trimmed = stdout.trim();
-    if (!trimmed) return { events: [], protocolError: "Claude returned no structured output", unreadable: true };
-
-    if (!trimmed.includes("\n")) {
-      try {
-        const raw = JSON.parse(trimmed) as Record<string, unknown>;
-        return this.parseRecords([{ provider: this.provider, type: String(raw.type ?? "result"), kind: raw.is_error === true ? "error" : "result", raw }]);
-      } catch {
-        return { events: [], protocolError: "Claude returned invalid JSON", unreadable: true };
-      }
-    }
     const parsed = parseJsonLines(this.provider, stdout);
     const warnings = parsed.warnings.length ? { warnings: parsed.warnings } : {};
     if (parsed.error) return { events: parsed.events, protocolError: parsed.error, unreadable: true, ...warnings };
-    return { ...this.parseRecords(parsed.events), ...warnings };
+    return { ...this.parseEvents(parsed.events), ...warnings };
   }
 
-  private parseRecords(events: ParsedOutput["events"]): ParsedOutput {
+  parseEvents(events: ParsedOutput["events"]): ParsedOutput {
     // Last terminal marker wins: a result followed by an `error` is a failure,
     // an `error` followed by a later result is a success.
     const terminal = findTerminalMarker(events, (event) => asRecord(event.raw)?.type === "result");
@@ -197,7 +196,7 @@ export class ClaudeAdapter implements ProviderAdapter {
       // Readable, but with no terminal marker at all: genuinely ambiguous.
       return { events, protocolError: "Claude stream did not contain a terminal result", unreadable: true };
     }
-    if (result.is_error === true) return { events, protocolError: String(result.result ?? "Claude reported an error") };
+    if (result.is_error === true) return { events, protocolError: providerFailureMessage("Claude", terminal!.event) };
     const usageRaw = asRecord(result.usage);
     const usage: AgentUsage = {};
     const inputTokens = numberValue(usageRaw?.input_tokens);
@@ -242,6 +241,7 @@ export class ClaudeAdapter implements ProviderAdapter {
         : [];
     return {
       events,
+      ...(result.structured_output !== undefined ? { structuredOutput: result.structured_output } : {}),
       ...(typeof result.result === "string" ? { finalText: result.result } : {}),
       ...(typeof result.session_id === "string" ? { sessionId: result.session_id } : {}),
       ...(principalModel ? { modelObserved: principalModel } : {}),

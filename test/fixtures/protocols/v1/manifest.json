@@ -1,0 +1,74 @@
+{
+  "protocolRevision": 1,
+  "provenance": "Synthetic, sanitized regression contracts; not captured authenticated provider sessions.",
+  "cases": [
+    {
+      "provider": "claude",
+      "file": "claude-success.jsonl",
+      "status": "succeeded"
+    },
+    {
+      "provider": "claude",
+      "file": "claude-error-after-success.jsonl",
+      "status": "failed"
+    },
+    {
+      "provider": "claude",
+      "file": "claude-incomplete.jsonl",
+      "status": "unparsed"
+    },
+    {
+      "provider": "codex",
+      "file": "codex-success.jsonl",
+      "status": "succeeded"
+    },
+    {
+      "provider": "codex",
+      "file": "codex-error-after-success.jsonl",
+      "status": "failed"
+    },
+    {
+      "provider": "codex",
+      "file": "codex-incomplete.jsonl",
+      "status": "unparsed"
+    },
+    {
+      "provider": "cursor",
+      "file": "cursor-success.jsonl",
+      "status": "succeeded"
+    },
+    {
+      "provider": "cursor",
+      "file": "cursor-error-after-success.jsonl",
+      "status": "failed"
+    },
+    {
+      "provider": "cursor",
+      "file": "cursor-incomplete.jsonl",
+      "status": "unparsed"
+    },
+    {
+      "provider": "antigravity",
+      "file": "antigravity-success.jsonl",
+      "status": "succeeded"
+    },
+    {
+      "provider": "antigravity",
+      "file": "antigravity-error-after-success.jsonl",
+      "status": "failed"
+    },
+    {
+      "provider": "antigravity",
+      "file": "antigravity-incomplete.jsonl",
+      "status": "unparsed"
+    },
+    {
+      "provider": "claude",
+      "file": "claude-schema.jsonl",
+      "status": "succeeded",
+      "structuredOutput": {
+        "answer": 42
+      }
+    }
+  ]
+}

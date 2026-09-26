@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.8.0 — 2026-09-26
+
+- Handle early stdin closure without crashing the caller; forward CLI stop
+  signals and finish process-tree cleanup even when the provider leader exits.
+- Retain session and model metadata on incomplete runs, surface structured
+  provider diagnostics, and expose Claude schema payloads as `structuredOutput`.
+- Generate unique default Claude worktree names. Support native Codex forks and
+  persistent isolated worktrees; reject unsupported Cursor/Antigravity forks.
+- Resolve Codex rollout attribution against the request environment, with
+  bounded transcript lookup, and recover native isolated checkout locations.
+- Bound stdout/stderr retention (configurable 16 MiB/1 MiB defaults), stop on
+  overflow, and decode structured events incrementally without reparsing them.
+- Detect optional capabilities from installed CLI help. Add Linux/Windows CI,
+  native process regression tests, and versioned provider protocol fixtures.
+- CLI `run` and `doctor` report newer stable package versions on stderr using
+  a cached, time-bounded npm check. JSON runs include structured `update`
+  metadata; `check-updates [--force]` exposes a standalone JSON check.
+- Exported `checkForUpdates()` and opt-in `runAgent` update checks for library
+  consumers. `AGENT_HEADLESS_NO_UPDATE_CHECK=1` disables checks; network and
+  cache failures never change a provider result or trigger an installation.
+  Environment overlays obey Windows case-insensitive variable names.
+
 ## 0.7.0
 
 - Behaviour change: a `--model` / `request.model` that is not in this runner's

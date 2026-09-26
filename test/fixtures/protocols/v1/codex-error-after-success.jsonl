@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"fixture-session"}
+{"type":"item.completed","item":{"type":"agent_message","text":"OK"}}
+{"type":"turn.completed","usage":{"input_tokens":3,"output_tokens":1}}
+{"type":"error","message":"fixture provider failure"}

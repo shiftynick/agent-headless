@@ -4,5 +4,6 @@ export declare class CodexAdapter implements ProviderAdapter {
     capabilities(executable?: string): Promise<ProviderCapabilities>;
     listModels(): Promise<string[]>;
     build(request: RunRequest): Invocation;
-    parse(stdout: string, structured: boolean): ParsedOutput;
+    parse(stdout: string, structured: boolean, request?: RunRequest): ParsedOutput;
+    parseEvents(events: ParsedOutput["events"], request?: RunRequest): ParsedOutput;
 }
