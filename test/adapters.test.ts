@@ -223,8 +223,12 @@ describe("CodexAdapter", () => {
     expect(invocation.args).toContain("workspace-write");
   });
 
-  test("rejects isolated editing", () => {
-    expect(() => adapter.build(request("codex", { access: "edit-isolated" }))).toThrow(AgentHeadlessError);
+  test("isolated editing uses a native persistent worktree", () => {
+    const invocation = adapter.build(request("codex", { access: "edit-isolated" }));
+    expect(invocation.args).toContain("--worktree");
+    expect(invocation.args).toContain("workspace-write");
+    expect(invocation.args).not.toContain("--ephemeral");
+    expect(() => adapter.build(request("codex", { access: "edit-isolated", session: { mode: "ephemeral" } }))).toThrow(/persistent/u);
   });
 
   test("requires inherited access semantics for resumed sessions", () => {

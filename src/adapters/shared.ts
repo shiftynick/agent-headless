@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { AgentHeadlessError, unsupported } from "../errors";
-import { effectiveEnv, envValue, resolveOnWindows } from "../process";
+import { effectiveEnv, envValue, resolveOnWindows, runInvocation } from "../process";
 import { asRecord } from "../jsonl";
 import type { AgentEvent, ParsedOutput, Provider, RunRequest, SessionMode } from "../types";
 
@@ -53,10 +53,51 @@ export function providerFailureMessage(label: string, event: AgentEvent): string
     raw?.message,
     raw?.error,
     raw?.reason,
+    raw?.result,
+    Array.isArray(raw?.errors) ? raw.errors.join("; ") : undefined,
     asRecord(raw?.item)?.message,
   ];
   const detail = candidates.find((value) => typeof value === "string" && value.trim());
   return `${label} reported ${event.type}${typeof detail === "string" ? `: ${detail.trim()}` : ""}`;
+}
+
+/** Session identity remains useful even when no terminal result was produced. */
+export function recoveryMetadata(events: AgentEvent[]): Pick<ParsedOutput, "sessionId" | "modelObserved"> {
+  let sessionId: string | undefined;
+  let modelObserved: string | undefined;
+  for (const event of events) {
+    const raw = asRecord(event.raw);
+    if (!raw || raw.isSidechain === true || raw.parent_tool_use_id != null) continue;
+    const session = event.kind === "session";
+    const result = event.kind === "result" || raw.type === "result";
+    if (session || result) {
+      const nested = asRecord(raw.result);
+      const id = raw.session_id ?? raw.thread_id ?? raw.conversation_id ?? nested?.conversation_id;
+      if (typeof id === "string" && id) sessionId = id;
+    }
+    const model = session ? raw.model ?? asRecord(raw.init)?.model
+      : raw.type === "assistant" ? asRecord(raw.message)?.model : undefined;
+    if (typeof model === "string" && model) modelObserved = model;
+  }
+  return { ...(sessionId ? { sessionId } : {}), ...(modelObserved ? { modelObserved } : {}) };
+}
+
+export function rejectUnsupportedFork(request: RunRequest): void {
+  if (request.session?.mode === "resume" && request.session.fork) {
+    unsupported(`${request.provider} does not support forking a session`);
+  }
+}
+
+/** Read-only feature evidence from the selected executable, never an authenticated run. */
+export async function executableFeatures(provider: Provider, command: string, args = ["--help"]): Promise<string[]> {
+  try {
+    const result = await runInvocation({ provider, command, args, cwd: process.cwd(), stdin: "", structured: false }, { timeoutMs: 10_000 });
+    if (result.exitCode !== 0 || result.timedOut || result.outputLimitExceeded) return [];
+    const help = `${result.stdout}\n${result.stderr}`;
+    const features = [...new Set(help.match(/--[a-z][a-z-]+\b/gu) ?? [])];
+    if (/^\s+fork\s/mu.test(help)) features.push("fork");
+    return features;
+  } catch { return []; }
 }
 
 export function envExecutable(provider: Provider, requestEnv?: Record<string, string | undefined>): string {

@@ -1,8 +1,19 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { AgentHeadlessError } from "./errors";
-import type { Invocation, Provider, ProviderAvailability } from "./types";
+import type { Invocation, OutputLimits, Provider, ProviderAvailability } from "./types";
+
+export const DEFAULT_OUTPUT_LIMITS: Readonly<OutputLimits> = Object.freeze({
+  stdoutBytes: 16 * 1024 * 1024,
+  stderrBytes: 1024 * 1024,
+});
+
+/** Keep a valid UTF-8 prefix without a replacement character exceeding the cap. */
+export function utf8Prefix(value: string, bytes: number): string {
+  return new StringDecoder("utf8").write(Buffer.from(value).subarray(0, bytes));
+}
 
 export interface ProcessResult {
   stdout: string;
@@ -11,6 +22,8 @@ export interface ProcessResult {
   durationMs: number;
   timedOut: boolean;
   cancelled: boolean;
+  outputLimitExceeded?: "stdout" | "stderr";
+  inputError?: string;
 }
 
 export interface ExecutableProbe {
@@ -150,9 +163,16 @@ export async function runInvocation(
     signal?: AbortSignal;
     env?: Record<string, string | undefined>;
     onStdoutLine?: (line: string) => void;
+    outputLimits?: Partial<OutputLimits>;
   },
 ): Promise<ProcessResult> {
   const started = Date.now();
+  const limits = { ...DEFAULT_OUTPUT_LIMITS, ...options.outputLimits };
+  for (const value of Object.values(limits)) {
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new AgentHeadlessError("invalid_request", "output limits must be positive safe integers");
+    }
+  }
   if (options.signal?.aborted) {
     return { stdout: "", stderr: "", exitCode: null, durationMs: 0, timedOut: false, cancelled: true };
   }
@@ -165,6 +185,14 @@ export async function runInvocation(
     let timedOut = false;
     let cancelled = false;
     let pendingLine = "";
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let outputLimitExceeded: "stdout" | "stderr" | undefined;
+    let inputError: string | undefined;
+    let closed = false;
+    let exitCode: number | null = null;
+    let cleanupDone = false;
+    let settled = false;
     const child = spawn(command, args, {
       cwd: invocation.cwd,
       env,
@@ -175,47 +203,91 @@ export async function runInvocation(
     });
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
+    const deliverLine = (line: string) => {
+      if (!line.trim()) return;
+      try { options.onStdoutLine?.(line); }
+      catch (error) {
+        inputError = `stdout callback failed: ${error instanceof Error ? error.message : String(error)}`;
+        terminate();
+      }
+    };
+    const retain = (chunk: string, stream: "stdout" | "stderr"): string => {
+      const used = stream === "stdout" ? stdoutBytes : stderrBytes;
+      const limit = stream === "stdout" ? limits.stdoutBytes : limits.stderrBytes;
+      const bytes = Buffer.byteLength(chunk);
+      const remaining = Math.max(0, limit - used);
+      if (stream === "stdout") stdoutBytes += bytes;
+      else stderrBytes += bytes;
+      if (bytes <= remaining) return chunk;
+      outputLimitExceeded ??= stream;
+      terminate();
+      return utf8Prefix(chunk, remaining);
+    };
     child.stdout.on("data", (chunk: string) => {
+      chunk = retain(chunk, "stdout");
       stdout += chunk;
       if (options.onStdoutLine) {
         pendingLine += chunk;
         const lines = pendingLine.split(/\r?\n/u);
         pendingLine = lines.pop() ?? "";
-        for (const line of lines) if (line.trim()) options.onStdoutLine(line);
+        for (const line of lines) deliverLine(line);
       }
     });
-    child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+    child.stderr.on("data", (chunk: string) => { stderr += retain(chunk, "stderr"); });
 
     let terminationRequested = false;
     let forceTimer: NodeJS.Timeout | undefined;
+    const finish = () => {
+      if (settled || !closed || (terminationRequested && !cleanupDone)) return;
+      settled = true;
+      clearTimeout(timer);
+      if (forceTimer) clearTimeout(forceTimer);
+      options.signal?.removeEventListener("abort", abort);
+      resolve({ stdout, stderr, exitCode, durationMs: Date.now() - started, timedOut, cancelled,
+        ...(outputLimitExceeded ? { outputLimitExceeded } : {}),
+        ...(inputError ? { inputError } : {}),
+      });
+    };
     const forceKill = () => {
-      if (!child.pid) return;
+      if (!child.pid) { cleanupDone = true; finish(); return; }
       if (process.platform === "win32") {
         const killer = spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], { windowsHide: true });
-        killer.on("error", () => { child.kill(); });
+        const deadline = setTimeout(() => { killer.kill(); child.kill(); }, 5_000);
+        const complete = () => { clearTimeout(deadline); cleanupDone = true; finish(); };
+        killer.on("error", () => { child.kill(); complete(); });
+        killer.on("close", (code) => { if (code !== 0) child.kill(); complete(); });
       } else {
         try { process.kill(-child.pid, "SIGKILL"); } catch { child.kill("SIGKILL"); }
+        cleanupDone = true;
+        finish();
       }
     };
     const terminate = () => {
       if (terminationRequested) return;
       terminationRequested = true;
+      clearTimeout(timer);
       if (process.platform === "win32" && child.pid) {
         forceKill();
       } else if (child.pid) {
         try { process.kill(-child.pid, "SIGTERM"); } catch { child.kill("SIGTERM"); }
         forceTimer = setTimeout(forceKill, 2_000);
-        forceTimer.unref();
       } else {
         child.kill("SIGTERM");
+        cleanupDone = true;
       }
     };
     const timer = setTimeout(() => { timedOut = true; terminate(); }, options.timeoutMs);
     const abort = () => { cancelled = true; terminate(); };
     options.signal?.addEventListener("abort", abort, { once: true });
     if (options.signal?.aborted) abort();
-    child.stdin.end(invocation.stdin, "utf8");
+    // EPIPE belongs to stdin, not ChildProcess. Without this listener an early
+    // provider exit crashes the host process before callers can catch anything.
+    child.stdin.on("error", (error: NodeJS.ErrnoException) => {
+      inputError = `provider stdin ${error.code ?? "error"}: ${error.message}`;
+      if (error.code !== "EPIPE" && error.code !== "ERR_STREAM_DESTROYED") terminate();
+    });
     child.on("error", (error: NodeJS.ErrnoException) => {
+      settled = true;
       clearTimeout(timer);
       if (forceTimer) clearTimeout(forceTimer);
       options.signal?.removeEventListener("abort", abort);
@@ -225,13 +297,19 @@ export async function runInvocation(
         reject(new AgentHeadlessError("provider_failed", `Unable to start ${invocation.provider}: ${error.message}`, { cause: error }));
       }
     });
-    child.on("close", (exitCode) => {
-      clearTimeout(timer);
-      if (forceTimer) clearTimeout(forceTimer);
-      options.signal?.removeEventListener("abort", abort);
-      if (options.onStdoutLine && pendingLine.trim()) options.onStdoutLine(pendingLine);
-      resolve({ stdout, stderr, exitCode, durationMs: Date.now() - started, timedOut, cancelled });
+    child.on("close", (code) => {
+      closed = true;
+      exitCode = code;
+      if (pendingLine.trim()) deliverLine(pendingLine);
+      // A closed leader does not prove the process group is gone. Keep the
+      // escalation timer alive for descendants that closed/inherited no pipes.
+      if (terminationRequested && process.platform !== "win32" && child.pid) {
+        try { process.kill(-child.pid, 0); }
+        catch { cleanupDone = true; }
+      }
+      finish();
     });
+    child.stdin.end(invocation.stdin, "utf8");
   });
 }
 

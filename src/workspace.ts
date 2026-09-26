@@ -96,6 +96,7 @@ export function describeWorkspace(
   cwd: string,
   events: AgentEvent[],
   stdout: string,
+  providerWorktree?: string,
 ): WorkspaceInfo {
   const isolated = request.access === "edit-isolated";
   const cursor = request.providerOptions?.cursor;
@@ -104,11 +105,11 @@ export function describeWorkspace(
     : request.provider === "cursor"
       ? cursor?.worktreeName
       : request.provider === "claude"
-        ? request.providerOptions?.claude?.worktreeName ?? "agent-headless"
+        ? request.providerOptions?.claude?.worktreeName
         : undefined;
   const worktreeBase = isolated && request.provider === "cursor" ? cursor?.worktreeBase : undefined;
   const disclosed = isolated
-    ? worktreeFromEvents(events, cwd) ?? worktreeFromText(stdout, worktreeName)
+    ? providerWorktree ?? worktreeFromEvents(events, cwd) ?? worktreeFromText(stdout, worktreeName)
     : undefined;
   // A disclosed path only beats the derived one once it is absolute; an
   // unusable disclosure falls through to deriving rather than being reported.

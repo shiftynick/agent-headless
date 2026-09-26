@@ -14,4 +14,4 @@ import type { AgentEvent, RunRequest, WorkspaceInfo } from "./types";
  * `absoluteReported`); one that cannot falls back to the derived path, or to
  * reporting no path at all. `worktree` is therefore always absolute.
  */
-export declare function describeWorkspace(request: RunRequest, cwd: string, events: AgentEvent[], stdout: string): WorkspaceInfo;
+export declare function describeWorkspace(request: RunRequest, cwd: string, events: AgentEvent[], stdout: string, providerWorktree?: string): WorkspaceInfo;

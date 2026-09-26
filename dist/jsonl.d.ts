@@ -15,6 +15,17 @@ export interface JsonLinesResult {
  * truncated trailing line can never discard a provider's real events.
  */
 export declare function parseJsonLines(provider: Provider, stdout: string): JsonLinesResult;
+/** Incremental JSONL decoder; input retention is bounded by the process runner. */
+export declare class JsonLineParser {
+    private provider;
+    private events;
+    private warnings;
+    private skipped;
+    private lineNumber;
+    constructor(provider: Provider);
+    push(line: string): AgentEvent | undefined;
+    result(): JsonLinesResult;
+}
 export declare function parseJsonEvent(provider: Provider, line: string): AgentEvent;
 export declare function asRecord(value: unknown): Record<string, unknown> | undefined;
 export declare function numberValue(value: unknown): number | undefined;

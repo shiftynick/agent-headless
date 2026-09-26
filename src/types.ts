@@ -26,6 +26,8 @@ export interface RunRequest {
   output?: OutputMode;
   session?: SessionMode;
   timeoutMs?: number;
+  /** Stop the run rather than retaining unbounded provider output. */
+  outputLimits?: Partial<OutputLimits>;
   maxBudgetUsd?: number;
   schema?: object | string;
   additionalDirs?: string[];
@@ -59,6 +61,11 @@ export interface AgentUsage {
   outputTokens?: number;
   reasoningOutputTokens?: number;
   costUsd?: number;
+}
+
+export interface OutputLimits {
+  stdoutBytes: number;
+  stderrBytes: number;
 }
 
 export interface AgentEvent {
@@ -101,9 +108,13 @@ export interface WorkspaceInfo {
 }
 
 export interface AgentResult {
+  /** Package update information when the caller enabled update checks. */
+  update?: import("./updates").UpdateInfo;
   provider: Provider;
   status: RunStatus;
   finalText?: string;
+  /** Provider-native schema-constrained output, when returned. */
+  structuredOutput?: unknown;
   events: AgentEvent[];
   exitCode: number | null;
   sessionId?: string;
@@ -151,6 +162,9 @@ export interface ProviderCapabilities {
   supportsEffort: boolean;
   supportsSchema: boolean;
   supportsModelListing: boolean;
+  supportsFork?: boolean;
+  /** Extra features confirmed from the installed executable's help output. */
+  detectedFeatures?: string[];
 }
 
 /**
@@ -167,6 +181,8 @@ export interface ListModelsOptions {
 }
 
 export interface RunAgentOptions {
+  /** Check npm for newer releases alongside the run. Default false; CLI enables it. */
+  checkForUpdates?: boolean;
   execute?: InvocationExecutor;
   /**
    * Used only on the model-rejection failure path, to name the models the
@@ -194,6 +210,7 @@ export type InvocationExecutor = (
     signal?: AbortSignal;
     env?: Record<string, string | undefined>;
     onStdoutLine?: (line: string) => void;
+    outputLimits?: Partial<OutputLimits>;
   },
 ) => Promise<{
   stdout: string;
@@ -202,6 +219,8 @@ export type InvocationExecutor = (
   durationMs: number;
   timedOut: boolean;
   cancelled: boolean;
+  outputLimitExceeded?: "stdout" | "stderr";
+  inputError?: string;
 }>;
 
 export interface Invocation {
@@ -215,6 +234,9 @@ export interface Invocation {
 
 export interface ParsedOutput {
   finalText?: string;
+  structuredOutput?: unknown;
+  /** Provider-reported isolated checkout, including a persisted session record. */
+  worktree?: string;
   events: AgentEvent[];
   sessionId?: string;
   /** Principal model that produced the provider's response. */
@@ -238,5 +260,6 @@ export interface ProviderAdapter {
   prepare?(request: RunRequest, options?: PrepareOptions): Promise<RunRequest>;
   listModels?(options?: ListModelsOptions): Promise<string[]>;
   build(request: RunRequest): Invocation;
-  parse(stdout: string, structured: boolean): ParsedOutput;
+  parse(stdout: string, structured: boolean, request?: RunRequest): ParsedOutput;
+  parseEvents?(events: AgentEvent[], request?: RunRequest): ParsedOutput;
 }

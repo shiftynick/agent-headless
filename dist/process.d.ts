@@ -1,4 +1,7 @@
-import type { Invocation, Provider, ProviderAvailability } from "./types";
+import type { Invocation, OutputLimits, Provider, ProviderAvailability } from "./types";
+export declare const DEFAULT_OUTPUT_LIMITS: Readonly<OutputLimits>;
+/** Keep a valid UTF-8 prefix without a replacement character exceeding the cap. */
+export declare function utf8Prefix(value: string, bytes: number): string;
 export interface ProcessResult {
     stdout: string;
     stderr: string;
@@ -6,6 +9,8 @@ export interface ProcessResult {
     durationMs: number;
     timedOut: boolean;
     cancelled: boolean;
+    outputLimitExceeded?: "stdout" | "stderr";
+    inputError?: string;
 }
 export interface ExecutableProbe {
     executable: string;
@@ -76,6 +81,7 @@ export declare function runInvocation(invocation: Invocation, options: {
     signal?: AbortSignal;
     env?: Record<string, string | undefined>;
     onStdoutLine?: (line: string) => void;
+    outputLimits?: Partial<OutputLimits>;
 }): Promise<ProcessResult>;
 export declare function readVersion(provider: Provider, command: string, cwd: string): Promise<string | undefined>;
 export declare function probeExecutable(provider: Provider, command: string, cwd: string): Promise<ExecutableProbe>;

@@ -16,6 +16,10 @@ export function normalizeRequest(request: RunRequest): RunRequest {
     invalid("maxBudgetUsd must be a positive number");
   }
   if (request.model !== undefined && !request.model.trim()) invalid("model must be non-empty");
+  for (const value of Object.values(request.outputLimits ?? {})) {
+    if (!Number.isSafeInteger(value) || value <= 0) invalid("output limits must be positive safe integers");
+  }
+  if (request.session?.mode === "resume" && !request.session.id?.trim()) invalid("resume requires a session ID");
   const additionalDirs = request.additionalDirs?.map((directory) => {
     if (!existsSync(directory) || !statSync(directory).isDirectory()) {
       invalid(`additional directory does not exist: ${directory}`);
@@ -32,7 +36,7 @@ export function normalizeRequest(request: RunRequest): RunRequest {
     ),
     output: request.output ?? "events",
     session: request.session ?? (
-      request.provider === "cursor" || request.provider === "antigravity"
+      request.provider === "cursor" || request.provider === "antigravity" || (request.provider === "codex" && request.access === "edit-isolated")
         ? { mode: "persistent" }
         : { mode: "ephemeral" }
     ),

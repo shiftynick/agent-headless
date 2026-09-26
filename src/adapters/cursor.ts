@@ -19,7 +19,9 @@ import type {
 import {
   assertAccess,
   assertSession,
+  rejectUnsupportedFork,
   envExecutable,
+  executableFeatures,
   findTerminalMarker,
   providerFailureMessage,
   textOutput,
@@ -315,6 +317,7 @@ export class CursorAdapter implements ProviderAdapter {
 
   async capabilities(executable = envExecutable(this.provider)): Promise<ProviderCapabilities> {
     const probe = await probeExecutable(this.provider, executable, process.cwd());
+    const features = probe.availability === "available" ? await executableFeatures(this.provider, executable) : [];
     return {
       provider: this.provider,
       executable: probe.executable,
@@ -323,8 +326,10 @@ export class CursorAdapter implements ProviderAdapter {
       ...(probe.reason ? { availabilityReason: probe.reason } : {}),
       access: ["answer-only", "inspect", "edit-isolated"],
       sessions: ["persistent", "resume"],
-      supportsModel: true,
-      supportsEffort: true,
+      supportsFork: false,
+      detectedFeatures: features,
+      supportsModel: features.includes("--model"),
+      supportsEffort: features.includes("--model"),
       supportsSchema: false,
       supportsModelListing: true,
     };
@@ -359,6 +364,7 @@ export class CursorAdapter implements ProviderAdapter {
   build(request: RunRequest): Invocation {
     assertAccess(request, ["answer-only", "inspect", "edit-isolated"]);
     assertSession(request, ["persistent", "resume"]);
+    rejectUnsupportedFork(request);
     // `prepare` normally fills this in; repeated here so a direct `build` matches.
     const model = request.model ?? CURSOR_DEFAULT_MODEL;
     if (model.toLowerCase() === "auto") unsupported("Cursor model=auto is not allowed; name an exact model");
@@ -401,26 +407,30 @@ export class CursorAdapter implements ProviderAdapter {
     };
   }
 
-  parse(stdout: string, structured: boolean): ParsedOutput {
+  parse(stdout: string, structured: boolean, request?: RunRequest): ParsedOutput {
     if (!structured) return textOutput(this.provider, stdout);
     const parsed = parseJsonLines(this.provider, stdout);
     const warnings = parsed.warnings.length ? { warnings: parsed.warnings } : {};
     if (parsed.error) return { events: parsed.events, protocolError: parsed.error, unreadable: true, ...warnings };
+    return { ...this.parseEvents(parsed.events, request), ...warnings };
+  }
+
+  parseEvents(events: ParsedOutput["events"], request?: RunRequest): ParsedOutput {
     // Last terminal marker wins, as for the other providers: a result followed
     // by an `error` is a failure, an `error` followed by a later result is not.
-    const terminal = findTerminalMarker(parsed.events, (event) => event.type.startsWith("result"));
+    const terminal = findTerminalMarker(events, (event) => event.type.startsWith("result"));
     if (terminal?.outcome === "failure") {
-      return { events: parsed.events, protocolError: providerFailureMessage("Cursor", terminal.event), ...warnings };
+      return { events: events, protocolError: providerFailureMessage("Cursor", terminal.event) };
     }
     const result = asRecord(terminal?.event.raw);
     if (!result) {
       // Readable, but with no terminal marker at all: genuinely ambiguous.
-      return { events: parsed.events, protocolError: "Cursor stream did not contain a terminal result", unreadable: true, ...warnings };
+      return { events: events, protocolError: "Cursor stream did not contain a terminal result", unreadable: true };
     }
     if (result.is_error === true || result.subtype !== "success") {
-      return { events: parsed.events, protocolError: String(result.result ?? "Cursor reported an error"), ...warnings };
+      return { events: events, protocolError: String(result.result ?? "Cursor reported an error") };
     }
-    const init = asRecord(parsed.events.find((event) => event.type.startsWith("system"))?.raw);
+    const init = asRecord(events.find((event) => event.type.startsWith("system"))?.raw);
     const rawUsage = asRecord(result.usage);
     const usage: AgentUsage = {};
     const inputTokens = numberValue(rawUsage?.inputTokens);
@@ -430,12 +440,11 @@ export class CursorAdapter implements ProviderAdapter {
     if (cachedInputTokens !== undefined) usage.cachedInputTokens = cachedInputTokens;
     if (outputTokens !== undefined) usage.outputTokens = outputTokens;
     return {
-      events: parsed.events,
+      events: events,
       ...(typeof result.result === "string" ? { finalText: result.result } : {}),
       ...(typeof result.session_id === "string" ? { sessionId: result.session_id } : typeof init?.session_id === "string" ? { sessionId: init.session_id } : {}),
       ...(typeof init?.model === "string" ? { modelObserved: init.model } : {}),
       ...(Object.keys(usage).length ? { usage } : {}),
-      ...warnings,
     };
   }
 }

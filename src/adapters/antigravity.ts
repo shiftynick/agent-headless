@@ -1,4 +1,4 @@
-import { providerFailure, assertAccess, assertSession, envExecutable, textOutput } from "./shared";
+import { executableFeatures, providerFailure, assertAccess, assertSession, rejectUnsupportedFork, envExecutable, textOutput } from "./shared";
 import { asRecord, numberValue, parseJsonLines } from "../jsonl";
 import { probeExecutable, runInvocation } from "../process";
 import { unsupported } from "../errors";
@@ -46,6 +46,7 @@ export class AntigravityAdapter implements ProviderAdapter {
 
   async capabilities(executable = envExecutable(this.provider)): Promise<ProviderCapabilities> {
     const probe = await probeExecutable(this.provider, executable, process.cwd());
+    const features = probe.availability === "available" ? await executableFeatures(this.provider, executable) : [];
     return {
       provider: this.provider,
       executable: probe.executable,
@@ -57,9 +58,11 @@ export class AntigravityAdapter implements ProviderAdapter {
       // command permissions for any shell tool the model proposes.
       access: ["answer-only", "inspect", "edit-workspace"],
       sessions: ["persistent", "resume"],
-      supportsModel: true,
-      supportsEffort: true,
-      supportsSchema: true,
+      supportsFork: false,
+      detectedFeatures: features,
+      supportsModel: features.includes("--model"),
+      supportsEffort: features.includes("--effort"),
+      supportsSchema: features.includes("--json-schema"),
       supportsModelListing: true,
     };
   }
@@ -80,6 +83,7 @@ export class AntigravityAdapter implements ProviderAdapter {
   build(request: RunRequest): Invocation {
     assertAccess(request, ["answer-only", "inspect", "edit-workspace"]);
     assertSession(request, ["persistent", "resume"]);
+    rejectUnsupportedFork(request);
     if (request.maxBudgetUsd !== undefined) unsupported("Antigravity does not expose a per-run budget flag");
     if (request.effort === "xhigh" || request.effort === "max") {
       unsupported("Antigravity effort supports low, medium, or high");
@@ -117,18 +121,22 @@ export class AntigravityAdapter implements ProviderAdapter {
     };
   }
 
-  parse(stdout: string, structured: boolean): ParsedOutput {
+  parse(stdout: string, structured: boolean, request?: RunRequest): ParsedOutput {
     if (!structured) return textOutput(this.provider, stdout);
     const parsed = parseJsonLines(this.provider, stdout);
     const warnings = parsed.warnings.length ? { warnings: parsed.warnings } : {};
     if (parsed.error) return { events: parsed.events, protocolError: parsed.error, unreadable: true, ...warnings };
+    return { ...this.parseEvents(parsed.events, request), ...warnings };
+  }
+
+  parseEvents(events: ParsedOutput["events"], request?: RunRequest): ParsedOutput {
 
     // AGY emits exactly one terminal `result` per print run. Scan from the end
     // so an explicit stream error after a nominal result still wins.
     let terminal: AgentEvent | undefined;
     let terminalFailure: AgentEvent | undefined;
-    for (let index = parsed.events.length - 1; index >= 0; index -= 1) {
-      const event = parsed.events[index]!;
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index]!;
       if (event.kind === "error") {
         terminalFailure = event;
         break;
@@ -141,31 +149,29 @@ export class AntigravityAdapter implements ProviderAdapter {
     if (terminalFailure) {
       const raw = asRecord(terminalFailure.raw);
       const message = typeof raw?.message === "string" ? `: ${raw.message}` : "";
-      return { events: parsed.events, protocolError: `Antigravity reported ${terminalFailure.type}${message}`, ...warnings };
+      return { events: events, protocolError: `Antigravity reported ${terminalFailure.type}${message}` };
     }
     const result = resultRecord(terminal);
     if (!result) {
       return {
-        events: parsed.events,
+        events: events,
         protocolError: "Antigravity stream did not contain a terminal result",
         unreadable: true,
-        ...warnings,
-      };
+        };
     }
     if (result.status !== "SUCCESS") {
-      return { events: parsed.events, protocolError: reportedFailure(result), ...warnings };
+      return { events: events, protocolError: reportedFailure(result) };
     }
-    const init = asRecord(parsed.events.find((event) => event.type === "init")?.raw);
+    const init = asRecord(events.find((event) => event.type === "init")?.raw);
     const initDetails = asRecord(init?.init);
     const conversationId = result.conversation_id ?? init?.conversation_id;
     const usage = usageFrom(asRecord(result.usage));
     return {
-      events: parsed.events,
+      events: events,
       ...(typeof result.response === "string" ? { finalText: result.response } : {}),
       ...(typeof conversationId === "string" && conversationId ? { sessionId: conversationId } : {}),
       ...(typeof initDetails?.model === "string" ? { modelObserved: initDetails.model } : {}),
       ...(usage ? { usage } : {}),
-      ...warnings,
     };
   }
 }

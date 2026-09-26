@@ -49,8 +49,8 @@ adapters. If the runtime cannot install project skills, read that file first.
 This package uses the authentication already configured by each provider CLI;
 it never accepts, stores, or prints provider tokens. Authenticate with the
 provider's own supported flow or a runtime secret store, never in source control
-or chat. `.env` remains ignored. The only configuration this package reads is
-the optional executable-path overrides listed above.
+or chat. `.env` remains ignored. Configuration comes from the executable-path
+overrides listed above and the update-check environment settings below.
 
 Start with a read-only discovery check, then choose a named model before a
 meaningful run:
@@ -71,6 +71,7 @@ enable a permission-bypass flag.
 ```powershell
 agent-headless capabilities
 agent-headless models <claude|codex|cursor|antigravity>
+agent-headless check-updates
 
 agent-headless run `
   --provider codex `
@@ -91,10 +92,54 @@ agent-headless run `
 Prompts can also be piped over stdin. `--json` prints the normalized result;
 without it the CLI prints only the final answer.
 
+### Package update notices
+
+`run` and `doctor` automatically check npm for a newer stable agent-headless
+release. When one is available, they print a notice on stderr. `run --json`
+also includes an `update` object, so supervisors can inspect it directly:
+
+```json
+{
+  "currentVersion": "0.7.0",
+  "status": "checked",
+  "latestVersion": "0.8.0",
+  "updateAvailable": true
+}
+```
+
+These versions are illustrative. `agent-headless check-updates` prints just
+this JSON object; add `--force` to refresh it immediately. An unreachable
+registry reports `status: "unavailable"`, with no `updateAvailable` value;
+it does not claim the installation is current. Checks never install anything
+or change provider results or exit codes.
+
+Successful checks are cached for 24 hours; failed checks for one hour. The
+registry request has a 1.5-second deadline and runs alongside the provider.
+Only public package metadata is requested from
+`https://registry.npmjs.org/agent-headless/latest`; no prompts, project paths,
+or provider credentials are sent. The cache lives in
+`$XDG_CACHE_HOME/agent-headless`, `%LOCALAPPDATA%/agent-headless` on Windows,
+or `~/.cache/agent-headless` otherwise. Cache write failures are harmless.
+
+Set `AGENT_HEADLESS_NO_UPDATE_CHECK=1` to disable both automatic and explicit
+checks (including `--force`). Help, `--version`, `models`, and `capabilities`
+do not check for updates. `doctor` retains its existing capability JSON shape
+and puts update notices only on stderr.
+
+Library calls have no automatic registry traffic by default. Call the exported
+`checkForUpdates()` directly, or use
+`runAgent(request, { checkForUpdates: true })` to include `result.update`.
+An update notice means the consuming repo should review and update its
+dependency and lockfile. Model IDs remain free-form even when the package
+version is pinned.
+
 The CLI exits `0` on success, `2` when the provider exited cleanly but its
 output could not be read (`status: "unparsed"` - the work may have completed,
 so check the reported workspace before retrying), and `1` for every other
 non-success outcome.
+On POSIX, SIGINT and SIGTERM cancel the provider process group and wait for
+cleanup before exiting with `130` or `143`. Library callers cancel with
+`request.signal`; on Windows cancellation terminates the provider process tree.
 
 ## Library
 
@@ -136,6 +181,32 @@ mode, and for isolated runs the `worktreeName` the runner pinned, the
 `worktreeBase` Git ref when one was requested, and the `worktree` path itself.
 See [Isolated worktrees are always located](#isolated-worktrees-are-always-located)
 for where that path comes from and when it can still be absent.
+
+Failures, timeouts, and cancellations retain any session ID and model identity
+already reported by the provider. A failed fork never substitutes the original
+session's ID for the new session's ID. Provider errors are included in warnings,
+printed on stderr for non-success CLI runs, and included in `assertSucceeded`
+errors when stderr is empty.
+
+### Structured output and output limits
+
+Claude's schema-constrained payload is available as `result.structuredOutput`,
+including when its text result is empty. Without `--json`, the CLI prints this
+payload as JSON; with `--json`, it remains a field of the normalized result.
+
+Provider output is bounded by default: 16 MiB of stdout and 1 MiB of stderr.
+Set `request.outputLimits: { stdoutBytes, stderrBytes }`, or the CLI options
+`--max-stdout-bytes` and `--max-stderr-bytes`, to change these positive limits.
+Exceeding either stops the provider, retains bounded partial output and events,
+and returns `failed` with an explicit incomplete-output warning. A terminal
+success marker before overflow does not turn the truncated run into success.
+Cancellation and timeout statuses take precedence if they also occurred.
+
+Structured events are decoded as they arrive and reused for final parsing.
+`onEvent` receives the live events; the returned event list is still retained
+within the output limit. A throwing synchronous callback is reported as a
+warning and does not terminate provider execution. This is a bounded in-memory
+transcript, not an unlimited streaming archive.
 
 ### The model catalog is a hint, not a gate
 
@@ -198,8 +269,29 @@ Codex's JSON event stream carries no model field at all, so its `modelObserved`
 is recovered from the session rollout file, which records the effective model
 on every `turn_context` line; the last one wins. Runs that persist no rollout
 report no observed model rather than echoing the requested one.
+Rollout lookup uses the run's effective environment, including `CODEX_HOME`
+overrides and deletions. It scans at most 10,000 entries and reads only the last
+2 MiB of a matching rollout. If the relevant metadata falls outside these
+bounds, attribution is omitted rather than guessed.
 
 ### Isolated worktrees are always located
+
+Claude now generates a unique worktree name when none is provided and reports
+that name even on failure. Explicit `providerOptions.claude.worktreeName`
+continues to win. Its location is reported when the provider discloses it.
+
+Recent Codex CLIs support `edit-isolated` through native `--worktree` with the
+`workspace-write` sandbox. These runs default to persistent sessions so their
+provider-created checkout can be recovered from session metadata; explicitly
+ephemeral isolated runs are rejected. The path is reported when the provider's
+events or rollout disclose it. A launch that fails before creating metadata may
+have no recoverable path. `doctor codex` checks the installed CLI's help for this
+feature; older CLIs may reject it and should be upgraded.
+
+For Claude and Codex, `session: { mode: "resume", id, fork: true }` starts a
+separate conversation using the provider's native fork operation. The CLI form
+is `--resume <id> --fork`. Cursor and Antigravity explicitly reject forks.
+Codex forks, like resumes, use `access: "inherit-session"`.
 
 Cursor accepts a bare `--worktree` and then names the worktree itself without
 reporting the choice, which loses the work when the stream is unreadable. The
@@ -248,9 +340,10 @@ callers that want to compute or verify the location themselves.
 | --- | --- | --- | --- | --- |
 | Read-only inspection | yes | yes | yes | plan mode |
 | In-place workspace edits | yes | yes | intentionally unsupported | yes |
-| Isolated worktree edits | yes | unsupported | yes | unavailable |
+| Isolated worktree edits | yes | recent CLI; persistent session | yes | unavailable |
 | Ephemeral sessions | yes | yes | unavailable | unavailable |
 | Resume | yes | yes | yes | yes |
+| Fork session | yes | recent CLI | unavailable | unavailable |
 | Effort | native flag | config override | parameterized model ID | native flag (low/medium/high) |
 | JSON Schema output | yes | file-based | unavailable | yes |
 | Per-run budget | yes | unavailable | unavailable | unavailable |
@@ -278,6 +371,13 @@ whether the configured executable is `available`, `missing`, or `unusable`, and
 includes the resolved executable path. Provider events retain their raw payload
 while also receiving a stable lifecycle `kind` suitable for supervisors and
 logs.
+Reports also include `detectedFeatures` from read-only help probes and
+`supportsFork`. Optional Codex worktree/fork support is detected from the selected
+executable's `exec --help`; model/schema flags are checked against help rather
+than assumed present. A failed help probe reports no detected features. The
+base access/session mappings still describe the adapter's contract; probes do
+not authenticate or perform model calls. Explicit runs pass supported adapter
+flags to the provider, which remains the final authority on acceptance.
 
 Codex does not let a resumed invocation replace the original sandbox policy.
 Accordingly, Codex resume calls use `access: "inherit-session"`; asking a
@@ -314,6 +414,12 @@ argument to `runAgent` to test without spawning a provider:
 ```ts
 await runAgent(request, { execute: fakeExecutor });
 ```
+
+CI runs Node 20, 22, and 24 on both Linux and Windows. Native process regression
+tests cover early stdin closure, process-tree cancellation, output limits, and
+CLI rendering. POSIX signal tests run on Linux; Windows tests exercise taskkill
+and `.cmd` execution. Versioned provider protocol fixtures and captured help
+snapshots live in `test/fixtures/protocols/`; their README records provenance.
 
 Live tests are opt-in because they use authenticated model calls:
 
