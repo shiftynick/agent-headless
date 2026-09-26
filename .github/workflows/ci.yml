@@ -10,7 +10,8 @@ permissions:
 
 jobs:
   test:
-    name: ${{ matrix.os }} / Node ${{ matrix.node }}
+    # Keep the Linux check names required by the main-branch ruleset.
+    name: ${{ matrix.os == 'ubuntu-latest' && 'Node' || 'Windows / Node' }} ${{ matrix.node }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
